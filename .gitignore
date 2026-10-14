@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.mcp.json
+.claude/settings.local.json
+data/
+*.xlsx
+*.csv
+__pycache__/
+.venv/
+.DS_Store
