@@ -53,7 +53,7 @@ function setup() {
 
   var msg = 'Готово: листы служебные, «' + SH.TEMPLATE + '», триггеры.';
   if (!prop('TG_TOKEN')) msg += '\nНЕТ токена бота: Расширения → Apps Script → Настройки проекта → Свойства скрипта → TG_TOKEN.';
-  if (!prop('B24_WEBHOOK')) msg += '\nНет B24_WEBHOOK: клиент в имени листа будет браться из ТЗ не будет — лист назовётся по ID.';
+  if (!prop('B24_WEBHOOK')) msg += '\nНет B24_WEBHOOK: без него лист назовётся только по ID сделки, без клиента.';
   safeAlert(msg);
 }
 
@@ -384,8 +384,7 @@ function freezePrices(sh) {
   var last = findRow(sh, LABEL.PAINTED) - 1;
   var rng = sh.getRange(HEADER_ROWS + 3, 2, last - HEADER_ROWS - 2, 1);
   var formulas = rng.getFormulas(), values = rng.getValues();
-  var out = formulas.map(function (f, i) { return [f[0] || values[i][0]]; });
-  out = out.map(function (v, i) { return [formulas[i][0].indexOf(SH.PRICES) >= 0 ? values[i][0] : v[0]]; });
+  var out = formulas.map(function (f, i) { return [f[0] && f[0].indexOf(SH.PRICES) < 0 ? f[0] : values[i][0]]; });
   rng.setValues(out);
 }
 
