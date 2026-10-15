@@ -97,7 +97,11 @@
       "mcp__Google_Drive__copy_file",
       "mcp__claude_ai_Google_Drive__share_file",
       "mcp__Google_Drive__share_file",
-      "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__b24_call"
+      "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__b24_call",
+      "mcp__a543223d-d85f-4ca2-81ea-917b8388d6bc__create_file",
+      "mcp__a543223d-d85f-4ca2-81ea-917b8388d6bc__update_file",
+      "mcp__a543223d-d85f-4ca2-81ea-917b8388d6bc__copy_file",
+      "mcp__a543223d-d85f-4ca2-81ea-917b8388d6bc__share_file"
     ],
     "deny": [
       "Read(./.env)",
@@ -226,7 +230,8 @@
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_update",
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_file_add",
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__bizproc_start",
-      "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__bizproc_task"
+      "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__bizproc_task",
+      "mcp__a543223d-d85f-4ca2-81ea-917b8388d6bc__trash_file"
     ]
   }
 }
