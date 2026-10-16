@@ -40,7 +40,11 @@ cp scripts/launchd/ru.90gradusov.client-agent.plist ~/Library/LaunchAgents/ && l
 launchctl unload ~/Library/LaunchAgents/ru.90gradusov.client-agent.plist
 ```
 
+Сторож (`scripts/check_client_agent.sh`, каждые 5 минут): если в пн–пт 10–19 МСК `heartbeat` старше 15 минут — предупреждение в Telegram, не чаще раза в час. Проверка без отправки: `CLIENT_AGENT_DIR=<папка с heartbeat> WATCHDOG_DRY_RUN=1 bash scripts/check_client_agent.sh`. Включить:
+```bash
+cp scripts/launchd/ru.90gradusov.check-client-agent.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/ru.90gradusov.check-client-agent.plist
+```
+
 ## Ещё не сделано
 - Боевой режим: отправка через API Wazzup, комментарий «ТЗ» и задача Екатерине в Б24 — после проверки API Wazzup и разбора черновиков.
-- Сторож по `heartbeat` (предупреждение, если агент не работал > 15 минут в рабочее время).
 - Заявки из Instagram и с сайта (сценарий «пишем первыми» из 12).
