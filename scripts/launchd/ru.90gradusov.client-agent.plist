@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ru.90gradusov.client-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/dmitrysharapov/Projects/90gradusov/.venv/bin/python</string>
+    <string>/Users/dmitrysharapov/Projects/90gradusov/app/client_agent/agent.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/dmitrysharapov/Projects/90gradusov</string>
+  <key>StartInterval</key><integer>120</integer>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>/Users/dmitrysharapov/Projects/90gradusov/data/client_agent/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/dmitrysharapov/Projects/90gradusov/data/client_agent/launchd.log</string>
+</dict>
+</plist>
