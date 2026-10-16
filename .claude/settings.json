@@ -84,7 +84,11 @@
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__task_get",
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_types",
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_list",
-      "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_get"
+      "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_get",
+      "Bash(python3 scripts/chat_response_times.py:*)",
+      "Bash(scripts/tg_send.sh data/chats/*)",
+      "Write(data/chats/**)",
+      "Edit(data/chats/**)"
     ],
     "ask": [
       "mcp__90__b24_call",
