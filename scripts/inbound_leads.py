@@ -41,6 +41,20 @@ GREETING = (
 )
 SOURCE_WORDS = {"instagram": "через Instagram", "site": "с сайта"}
 
+# Для автоотправки (утверждено 16.10.2026): от имени ассистента, не Екатерины (правило docs/13).
+# Черновик в комментарии лида для ручной отправки остаётся от имени Екатерины (GREETING выше).
+ASSISTANT_GREETING = (
+    "Здравствуйте{name}! Я ассистент компании «90 градусов». {received}\n\n"
+    "Расчёт подготовит наш менеджер Екатерина. Чтобы было быстрее, пришлите, пожалуйста, что есть из этого:\n"
+    "1. Размеры, чертёж или фото-референс.\n"
+    "2. Количество.\n"
+    "3. Материал и цвет, если уже выбрали (нержавейка, чёрная сталь в покраске и т. п.).\n"
+    "4. Город, нужны ли доставка и монтаж.\n"
+    "5. Желаемый срок.\n"
+    "6. Для кого заказ: для себя, для компании (нужен ли НДС) или вы дизайнер.\n\n"
+    "Если есть дизайн-проект — присылайте целиком, посчитаем по нему."
+)
+
 
 # ---------- окружение и Б24 ----------
 
@@ -209,12 +223,14 @@ def short_request(text):
     return t[0].lower() + t[1:]
 
 
-def greeting(req):
+def greeting(req, assistant=False):
+    """assistant=False — черновик для Екатерины; True — текст автоотправки от ассистента."""
     name = req["name"].split()[0] if req["name"] and not re.search(r"\d", req["name"]) else ""
     src = SOURCE_WORDS[req["source"]]
     what = short_request(req["request"])
     received = f"Получили ваш запрос {src}: {what}." if what else f"Получили ваш запрос {src}."
-    return GREETING.format(name=f", {name}" if name else "", received=received)
+    tpl = ASSISTANT_GREETING if assistant else GREETING
+    return tpl.format(name=f", {name}" if name else "", received=received)
 
 
 def send_time(created):
