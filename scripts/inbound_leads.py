@@ -7,13 +7,16 @@
   (по умолчанию) вхолостую — только чтение Б24: разбор заявок, проверка дублей за 60 дней,
                  черновики приветствий. Ничего не создаёт и не отправляет.
   --create       создать контакт + лид + комментарий (только для заявок без дубля).
-Отправка приветствия через Wazzup пока не реализована: ждёт решения владельца об автоотправке
-и проверки формата API (как писать первым по нику/телефону — НЕ ПРОВЕРЕНО).
+  --send         вместе с --create: отправить приветствие от ассистента через Wazzup (по телефону),
+                 записать его в реестр агента клиентов и комментарий в лид. ПО УМОЛЧАНИЮ ВЫКЛЮЧЕНО:
+                 автоотправку включает владелец (docs/12, «Стык с агентом клиентов»).
+                 Отправка по нику не проверена — заявки только с ником получают черновик, как без --send.
 
-Запуск: python3 scripts/inbound_leads.py [--since 2026-10-01] [--create]
+Запуск: python3 scripts/inbound_leads.py [--since 2026-10-01] [--create [--send]]
 """
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -253,7 +256,13 @@ def comment(b24, entity, eid, text):
     b24.call("crm.timeline.comment.add", {"fields": {"ENTITY_ID": int(eid), "ENTITY_TYPE": entity, "COMMENT": text}})
 
 
-def create(b24, req, draft):
+def draft_comment(b24, lid, draft, why="автоматически НЕ отправлено"):
+    comment(b24, "lead", lid, f"Черновик приветствия ({why} — отправить вручную из Wazzup, "
+                              f"{draft['when']}):\n\n{draft['text']}")
+
+
+def create(b24, req, draft, greet_note=True):
+    """greet_note=False — комментарий о приветствии пишет отправка (--send)."""
     src = INSTA_SOURCE if req["source"] == "instagram" else SITE_SOURCE
     contact = {"NAME": req["name"] or req["tg"] or req["phone"], "SOURCE_ID": src, "ASSIGNED_BY_ID": MANAGER_ID}
     if req["phone"]:
@@ -274,9 +283,10 @@ def create(b24, req, draft):
         if req["tg"]:
             lead["UF_CRM_TELEGRAMUSERNAME_WZ"] = req["tg"]
         lid = b24.call("crm.lead.add", {"fields": lead})
-    if draft:
-        comment(b24, "lead", lid, f"Черновик приветствия (автоматически НЕ отправлено — отправить вручную из Wazzup, "
-                                  f"{draft['when']}):\n\n{draft['text']}")
+    if not greet_note:
+        pass
+    elif draft:
+        draft_comment(b24, lid, draft)
     elif req.get("chat_bound"):
         comment(b24, "lead", lid, "Контакт создан автоматически. Переписка в Telegram уже идёт — приветствие не нужно.")
     else:
@@ -298,6 +308,71 @@ def mark_dup(b24, req, dups):
     return f"{kind} {eid}"
 
 
+# ---------- отправка приветствия (только с --send) ----------
+
+WAZZUP = "https://api.wazzup24.com/v3/"
+WORK_TG = "79893409090"     # рабочий Telegram, канал Wazzup
+SEND_BY_USERNAME = False    # отправка по нику (`username`) НЕ ПРОВЕРЕНА — включить после теста на своём аккаунте
+# Реестр приветствий, отправленных не агентом: агент клиентов (13) считает эти тексты своими
+# и сразу ведёт диалог, а не принимает приветствие за ответ Екатерины.
+REGISTRY = ROOT / "data" / "client_agent" / "external_sent.json"
+
+
+def wazzup(env, path, body=None):
+    req = urllib.request.Request(WAZZUP + path, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {env['WAZZUP_API_KEY']}",
+                                          "Content-Type": "application/json"},
+                                 method="GET" if body is None else "POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode() or "null")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Wazzup {path}: HTTP {e.code} {e.read().decode()[:300]}")
+
+
+def wazzup_channel(env):
+    """channelId рабочего Telegram: из .env (WAZZUP_CHANNEL_ID) или из GET /v3/channels."""
+    if env.get("WAZZUP_CHANNEL_ID"):
+        return env["WAZZUP_CHANNEL_ID"]
+    # ДОПУЩЕНИЕ: в ответе /v3/channels поля transport и plainId (номер канала) — по документации Wazzup
+    chans = [c for c in wazzup(env, "channels") or [] if c.get("transport") == "telegram"]
+    pick = [c for c in chans if WORK_TG in re.sub(r"\D", "", str(c.get("plainId", "")))] or chans
+    if len(pick) != 1:
+        raise RuntimeError(f"Wazzup: каналов Telegram подходит {len(pick)}, нужен один — задайте WAZZUP_CHANNEL_ID")
+    return pick[0]["channelId"]
+
+
+def registry_add(lid, entry, path=None):
+    path = path or REGISTRY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    reg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    reg.setdefault(str(lid), []).append(entry)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)  # агент читает файл в любой момент — пишем целиком
+
+
+def send_greeting(b24, env, req, lid, channel):
+    """Отправить приветствие ассистента. Возвращает запись реестра или None, если отправить нечем."""
+    text = greeting(req, assistant=True)
+    body = {"channelId": channel, "chatType": "telegram", "text": text}
+    if req["phone"]:
+        body["phone"] = req["phone"].lstrip("+")
+    elif req["tg"] and SEND_BY_USERNAME:
+        body["username"] = req["tg"].lstrip("@")
+    else:
+        return None
+    res = wazzup(env, "message", body) or {}
+    entry = {"time": datetime.now().astimezone().isoformat(timespec="seconds"), "text": text,
+             "phone": body.get("phone", ""), "username": req["tg"],
+             # chatId из ответа Wazzup — по нему агент ищет лид, который Wazzup может завести на ответ клиента
+             "chat_id": str(res.get("chatId") or ""), "message_id": str(res.get("messageId") or "")}
+    registry_add(lid, entry)  # до комментария: если Б24 не ответит, агент всё равно узнает своё приветствие
+    comment(b24, "lead", lid, f"Приветствие отправлено ассистентом (Wazzup, Telegram "
+                              f"{req['phone'] or req['tg']}):\n\n{text}")
+    return entry
+
+
 # ---------- main ----------
 
 STATE = ROOT / "data" / "leads" / "inbound_state.json"
@@ -314,8 +389,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default=(date.today() - timedelta(days=14)).isoformat())
     ap.add_argument("--create", action="store_true")
+    ap.add_argument("--send", action="store_true",
+                    help="отправлять приветствие через Wazzup (по умолчанию выкл.; включает владелец)")
     ap.add_argument("--work-hours-only", action="store_true", help="для расписания: выйти вне пн–пт 10–19")
     args = ap.parse_args()
+    if args.send and not args.create:
+        ap.error("--send работает только вместе с --create")
 
     now = datetime.now()
     if args.work_hours_only and not (now.weekday() < 5 and WORK_START <= now.hour < WORK_END):
@@ -375,8 +454,11 @@ def main():
                     res = {"result": "дубль", "where": where}
                 else:
                     draft = {"text": greeting(r), "when": send_time(r["date"])} if can_greet else None
-                    cid, lid = create(b24, r, draft)
+                    sending = bool(args.send and draft)
+                    cid, lid = create(b24, r, draft, greet_note=not sending)
                     res = {"result": "создано", "contact": cid, "lead": lid}
+                    if sending:  # ошибка отправки не отменяет созданный лид — иначе следующий запуск создаст дубль
+                        res["greeting"] = greet(b24, env, r, lid, draft)
                 out.append(f"- Б24: {res}\n")
                 log(f"{r['src_id']} {res}")
             except Exception as e:  # не отмечаем как обработанное — повторим в следующий запуск
@@ -393,6 +475,27 @@ def main():
         f.write(report + "\n")
     print(report)
     print(f"\nОтчёт: {path.relative_to(ROOT)}")
+
+
+def greet(b24, env, r, lid, draft):
+    """Отправка с --send. Не отправилось — черновик в лид, как без --send."""
+    now = datetime.now()
+    if not (now.weekday() < 5 and WORK_START <= now.hour < WORK_END):
+        draft_comment(b24, lid, draft, "нерабочее время, автоматически НЕ отправлено")
+        return "нерабочее время — черновик"
+    try:
+        sent = send_greeting(b24, env, r, lid, wazzup_channel(env))
+    except Exception as e:
+        log(f"lead {lid} приветствие ОШИБКА {e}")
+        try:
+            draft_comment(b24, lid, draft, "ошибка отправки, НЕ отправлено")
+        except Exception:
+            pass
+        return f"ошибка: {e}"
+    if not sent:
+        draft_comment(b24, lid, draft, "нет телефона, отправка по нику не проверена")
+        return "нет телефона — черновик"
+    return "отправлено"
 
 
 if __name__ == "__main__":
