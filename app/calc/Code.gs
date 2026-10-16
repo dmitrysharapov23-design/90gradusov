@@ -21,7 +21,9 @@ var SH = {
   PRICES: 'Цены',
   REGISTRY: 'Реестр',
   EDITS: 'Журнал_правок',
-  INVOICES: 'Счета_входящие'
+  INVOICES: 'Счета_входящие',
+  OFFERS: 'Цены_предложения',
+  PRICE_LOG: 'Цены_история'
 };
 
 // Шапка листа расчёта (4 строки над старым шаблоном).
@@ -40,6 +42,18 @@ var REGISTRY_HEAD = ['ID сделки', 'Клиент', 'Лист', 'Ссылк�
   'Заполнен', 'Утверждён', 'Итого, ₽', 'Сделка Б24', 'Изделия'];
 var STATUS_ARCHIVE = 'Архив';
 
+var INVOICE_HEAD = ['Дата', 'От', 'Файл', 'Тип', 'file_id', 'Подпись', 'Сообщение', 'Обработан',
+  'Файл Drive', 'Распознано', 'Поставщик', '№ счёта', 'Дата счёта', 'Позиций', 'На подтверждение'];
+// Колонки «Цены_предложения» (с 1).
+var OFFER_HEAD = ['Дата счёта', 'Поставщик', '№ счёта', 'Позиция в счёте', 'Кол-во', 'Ед.', 'Цена в счёте, ₽',
+  'Материал в калькуляторе', 'Ед. калькулятора', 'Новая цена, ₽', 'Как пересчитано', 'Текущая цена, ₽',
+  'Изменение', 'Решение', 'Статус', 'Счёт', 'служебное'];
+var OF = { DATE: 1, SUPPLIER: 2, NUMBER: 3, ITEM: 4, QTY: 5, UNIT: 6, PRICE: 7, KEY: 8, CUNIT: 9, NEW: 10,
+  HOW: 11, CUR: 12, DELTA: 13, DECISION: 14, STATUS: 15, LINK: 16, RAW: 17 };
+var DECISION = { ACCEPT: 'Принять', REJECT: 'Отклонить' };
+var PRICE_LOG_HEAD = ['Когда', 'Ключ', 'Было, ₽', 'Стало, ₽', 'Дата счёта', 'Поставщик', '№ счёта', 'Кто'];
+var BIG_CHANGE = 0.3; // изменение больше ±30% подсвечивается — проверить, не ошибка ли
+
 // ---------- Меню и установка ----------
 
 function onOpen() {
@@ -55,16 +69,22 @@ function setup() {
   ensurePrices(ss);
   ensureSheet(ss, SH.REGISTRY, REGISTRY_HEAD);
   ensureSheet(ss, SH.EDITS, ['Когда', 'Лист', 'Ячейка', 'Строка', 'Изделие', 'Было', 'Стало', 'Кто', 'Статус листа']);
-  ensureSheet(ss, SH.INVOICES, ['Дата', 'От', 'Файл', 'Тип', 'file_id', 'Подпись', 'Сообщение', 'Обработан']);
+  ensureHeader(ensureSheet(ss, SH.INVOICES, INVOICE_HEAD), INVOICE_HEAD);
+  ensureOffers(ss);
+  ensureSheet(ss, SH.PRICE_LOG, PRICE_LOG_HEAD);
+  ensureSetting('tg_prices', '', 'Кто подтверждает цены из счетов: логин Telegram без @ или ID из tg_started (пусто — без оповещений)');
+  ensureSetting('invoices_folder', '', 'Папка Drive для счетов из «Админ» — создаётся сама');
+  ensureSetting('invoices_import', '', 'ID папки Drive со старыми счетами (экспорт чата) — для разового importInvoiceFolder');
   var tpl = ss.getSheetByName(SH.TEMPLATE);
   if (!tpl) buildTemplateV2(ss);
   else setPriceFormulas(tpl, HEADER_ROWS); // переписать формулы цен (например, после смены разделителя)
   if (!ss.getSheetByName(SH.HOME)) buildHome(ss);
 
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (['pollTelegram', 'onEditCalc'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
+    if (['pollTelegram', 'onEditCalc', 'processInvoices'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('pollTelegram').timeBased().everyMinutes(1).create();
+  ScriptApp.newTrigger('processInvoices').timeBased().everyMinutes(10).create();
   ScriptApp.newTrigger('onEditCalc').forSpreadsheet(ss).onEdit().create();
 
   var msg = 'Готово: листы служебные, «' + SH.TEMPLATE + '», триггеры.';
@@ -92,6 +112,16 @@ function ensureSheet(ss, name, head) {
   sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
   sh.setFrozenRows(1);
   return sh;
+}
+
+// Дописывает недостающие колонки справа (лист создан старой версией).
+function ensureHeader(sh, head) {
+  if (sh.getLastColumn() < head.length) sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
+}
+
+function ensureSetting(key, value, note) {
+  if (key in readSettings()) return;
+  book().getSheetByName(SH.SETTINGS).appendRow([key, value, note]);
 }
 
 function ensureSettings(ss) {
@@ -316,6 +346,307 @@ function onCalcRequest(req, msg) {
   notify('tg_raschetchik', 'Новый расчёт «' + escapeHtml(name) + '».\n' + sheetUrl(sh), msg.chat.id);
 }
 
+// ---------- Счета → предложения цен (этап 3) ----------
+
+function ensureOffers(ss) {
+  var sh = ss.getSheetByName(SH.OFFERS);
+  if (sh) return sh;
+  sh = ensureSheet(ss, SH.OFFERS, OFFER_HEAD);
+  var sep = argSep();
+  sh.getRange(2, OF.KEY, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SH.PRICES).getRange('A2:A'), true).setAllowInvalid(true).build());
+  sh.getRange(2, OF.DECISION, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList([DECISION.ACCEPT, DECISION.REJECT], true).build());
+  sh.getRange(1, OF.NEW, sh.getMaxRows(), 1).setBackground('#fff8e1');
+  sh.getRange(1, OF.DECISION, sh.getMaxRows(), 1).setBackground('#e3f2fd');
+  var all = sh.getRange(2, 1, sh.getMaxRows() - 1, OFFER_HEAD.length);
+  var delta = sh.getRange(2, OF.DELTA, sh.getMaxRows() - 1, 1);
+  sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=LEFT($O2' + sep + ' 7)="Принято"')
+      .setBackground('#e8f5e9').setRanges([all]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=LEFT($O2' + sep + ' 9)="Отклонено"')
+      .setFontColor('#999999').setRanges([all]).build(),
+    // Без дробей и запятых в формуле: в русской локали десятичный разделитель — запятая.
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=ABS(N($M2))*100>' + Math.round(BIG_CHANGE * 100))
+      .setBackground('#f8d7da').setRanges([delta]).build()
+  ]);
+  sh.hideColumns(OF.RAW);
+  sh.setColumnWidth(OF.ITEM, 280).setColumnWidth(OF.KEY, 260).setColumnWidth(OF.HOW, 300).setColumnWidth(OF.STATUS, 260);
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+// Триггер раз в 10 минут: новые файлы из «Счета_входящие» → Drive → распознавание → «Цены_предложения».
+function processInvoices() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  var started = Date.now();
+  try {
+    var sh = book().getSheetByName(SH.INVOICES);
+    var data = sh.getDataRange().getValues();
+    for (var r = 1; r < data.length && Date.now() - started < 4 * 60 * 1000; r++) {
+      if (data[r][7] || !data[r][4]) continue;
+      var res;
+      try { res = processInvoiceRow(data[r]); } catch (e) {
+        console.error('счёт, строка ' + (r + 1) + ': ' + e.stack);
+        res = { status: 'ошибка: ' + e.message };
+      }
+      sh.getRange(r + 1, 8, 1, 8).setValues([[res.status, res.fileUrl || '', res.ocrUrl || '', res.supplier || '',
+        res.number || '', res.date || '', res.items == null ? '' : res.items, res.offers == null ? '' : res.offers]]);
+      SpreadsheetApp.flush();
+      if (res.offers) notifyPrices(res);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Строка «Счета_входящие» → {status, fileUrl, ocrUrl, supplier, number, date, items, offers}.
+function processInvoiceRow(row) {
+  var name = String(row[2] || 'файл'), mime = String(row[3] || ''), fileId = String(row[4]);
+  var kind = /pdf/i.test(mime) || /\.pdf$/i.test(name) ? 'doc'
+    : /^image\//i.test(mime) ? 'doc'
+    : /spreadsheet|excel/i.test(mime) || /\.xlsx?$/i.test(name) ? 'sheet' : '';
+  if (!kind) return { status: 'пропущено: не счёт (' + (mime || name) + ')' };
+
+  var folders = invoiceFolders();
+  var file;
+  if (fileId.indexOf('drive:') === 0) file = DriveApp.getFileById(fileId.slice(6));
+  else {
+    var blob = telegramFile(fileId).setName(String(row[0]).slice(0, 10) + ' ' + name);
+    file = folders.files.createFile(blob);
+  }
+  var conv = Drive.Files.create({
+    name: 'распознано ' + file.getName(), parents: [folders.ocr.getId()],
+    mimeType: kind === 'doc' ? MimeType.GOOGLE_DOCS : MimeType.GOOGLE_SHEETS
+  }, file.getBlob(), { ocrLanguage: 'ru', fields: 'id' });
+
+  var text = '', lines = [], tableRows = [];
+  if (kind === 'doc') {
+    var body = DocumentApp.openById(conv.id).getBody();
+    text = body.getText();
+    lines = text.split(/\n/);
+    body.getTables().forEach(function (t) {
+      for (var i = 0; i < t.getNumRows(); i++) {
+        var tr = t.getRow(i), cells = [];
+        for (var j = 0; j < tr.getNumCells(); j++) cells.push(tr.getCell(j).getText());
+        tableRows.push(cells);
+      }
+    });
+  } else {
+    var ss = SpreadsheetApp.openById(conv.id);
+    ss.getSheets().forEach(function (s) {
+      s.getDataRange().getValues().forEach(function (cells) { tableRows.push(cells); });
+    });
+    text = tableRows.map(function (c) { return c.join(' '); }).join('\n');
+  }
+
+  var head = parseInvoiceHeader(text);
+  var inv = parseInvoice(lines, tableRows);
+  var res = {
+    fileUrl: file.getUrl(), ocrUrl: 'https://drive.google.com/open?id=' + conv.id,
+    supplier: head.supplier, number: head.number, date: head.date || String(row[0]).slice(0, 10),
+    items: inv.items.length, offers: 0, caption: row[5], link: row[6]
+  };
+  if (!inv.items.length) {
+    res.status = 'нет позиций' + (inv.skipped.length ? ' (только услуги: ' + inv.skipped.length + ')' : '') +
+      ' — проверьте распознанный файл';
+    return res;
+  }
+  res.offers = addOffers(res, inv.items);
+  res.status = 'разобрано ' + nowStr() + ': позиций ' + inv.items.length +
+    (inv.skipped.length ? ', услуги/доставка пропущены: ' + inv.skipped.length : '');
+  return res;
+}
+
+function addOffers(inv, items) {
+  var sh = book().getSheetByName(SH.OFFERS);
+  var catalog = readPrices();
+  var start = sh.getLastRow() + 1, sep = argSep();
+  var rows = items.map(function (it, i) {
+    var r = start + i;
+    var m = matchMaterial(it.name, catalog);
+    var calc = offerCalc(it, m.key, catalog);
+    var notes = [];
+    if (!it.checked) notes.push('кол-во × цена ≠ сумма — проверьте строку');
+    if (!m.key) notes.push(m.note);
+    else if (calc.price === '') notes.push('впишите новую цену вручную');
+    return [inv.date, inv.supplier, inv.number, it.name, it.qty, it.unit, it.price,
+      m.key, calc.unit, calc.price, calc.how, currentPriceFormula(r, sep),
+      '=IF(AND(ISNUMBER(J' + r + ')' + sep + ' ISNUMBER(L' + r + ')' + sep + ' L' + r + '>0)' + sep + ' J' + r + '/L' + r + '-1' + sep + ' "")',
+      '', 'ждёт решения' + (notes.length ? ': ' + notes.join('; ') : ''),
+      inv.link || inv.fileUrl, JSON.stringify(it)];
+  });
+  sh.getRange(start, 1, rows.length, OFFER_HEAD.length).setValues(rows);
+  sh.getRange(start, OF.DELTA, rows.length, 1).setNumberFormat('+0%;-0%;0%');
+  sh.getRange(start, OF.NEW, rows.length, 1).setNumberFormat('#,##0.00');
+  sh.getRange(start, OF.CUR, rows.length, 1).setNumberFormat('#,##0.00');
+  return rows.length;
+}
+
+// Текущая цена — живая ссылка на «Цены»: после принятия одной строки остальные сравниваются с новой ценой.
+function currentPriceFormula(r, sep) {
+  var P = "'" + SH.PRICES + "'!";
+  return '=IFERROR(INDEX(' + P + '$E:$E' + sep + ' MATCH(H' + r + sep + ' ' + P + '$A:$A' + sep + ' 0))' + sep + ' "")';
+}
+
+// Цена в единице калькулятора для выбранного материала.
+function offerCalc(it, key, catalog) {
+  var c = key && catalog.filter(function (x) { return x.key === key; })[0];
+  if (!c) return { unit: '', price: '', how: '' };
+  var conv = convertPrice(it, c);
+  return { unit: c.unit, price: conv.price, how: conv.how };
+}
+
+// Лист «Цены» → [{row, key, section, name, unit, price, date}].
+function readPrices() {
+  var vals = book().getSheetByName(SH.PRICES).getDataRange().getValues();
+  var out = [];
+  for (var r = 1; r < vals.length; r++) {
+    if (!vals[r][0]) continue;
+    out.push({ row: r + 1, key: String(vals[r][0]), section: vals[r][1], name: vals[r][2], unit: vals[r][3],
+      price: vals[r][4], date: vals[r][5] });
+  }
+  return out;
+}
+
+// Правка в «Цены_предложения»: выбран материал → пересчёт; решение → цена в «Цены».
+function onEditOffers(e) {
+  var sh = e.range.getSheet(), row = e.range.getRow(), col = e.range.getColumn();
+  if (row < 2 || e.range.getNumRows() > 1 || e.range.getNumColumns() > 1) return;
+  var who = (e.user && e.user.getEmail && e.user.getEmail()) || '';
+  var vals = sh.getRange(row, 1, 1, OFFER_HEAD.length).getValues()[0];
+  var status = String(vals[OF.STATUS - 1]);
+  var done = /^(Принято|Отклонено)/.test(status);
+
+  if (col === OF.KEY && !done) {
+    var it = offerItem(vals);
+    var calc = offerCalc(it, String(e.value || ''), readPrices());
+    sh.getRange(row, OF.CUNIT, 1, 3).setValues([[calc.unit, calc.price, calc.how]]);
+    sh.getRange(row, OF.STATUS).setValue('ждёт решения' + (!e.value ? ': выберите материал'
+      : calc.price === '' ? ': впишите новую цену вручную' : ''));
+  } else if (col === OF.NEW && !done) {
+    sh.getRange(row, OF.HOW).setValue(String(vals[OF.HOW - 1]).replace(/ · вручную.*$/, '') +
+      ' · вручную' + (e.oldValue !== undefined ? ' (было ' + e.oldValue + ')' : ''));
+  } else if (col === OF.DECISION) {
+    if (done) { // решение уже применено — не меняем
+      sh.getRange(row, OF.DECISION).setValue(e.oldValue === undefined ? '' : e.oldValue);
+      return;
+    }
+    if (e.value === DECISION.REJECT) {
+      sh.getRange(row, OF.STATUS).setValue('Отклонено ' + nowStr() + (who ? ' (' + who + ')' : ''));
+    } else if (e.value === DECISION.ACCEPT) {
+      var res = acceptOffer(vals, who);
+      if (res.error) {
+        sh.getRange(row, OF.DECISION).setValue('');
+        sh.getRange(row, OF.STATUS).setValue('не принято: ' + res.error);
+      } else {
+        // Строку фиксируем значениями: формула текущей цены после принятия показывала бы уже новую.
+        sh.getRange(row, OF.CUR, 1, 2).setValues([[res.old, res.old > 0 ? Number(vals[OF.NEW - 1]) / res.old - 1 : '']]);
+        sh.getRange(row, OF.STATUS).setValue('Принято ' + nowStr() + (who ? ' (' + who + ')' : '') +
+          ', было ' + (res.old === '' ? 'пусто' : fmt(res.old)));
+      }
+    }
+  }
+}
+
+function offerItem(vals) {
+  try { return JSON.parse(vals[OF.RAW - 1]); } catch (e) {
+    return { name: vals[OF.ITEM - 1], qty: vals[OF.QTY - 1], unit: vals[OF.UNIT - 1], price: vals[OF.PRICE - 1] };
+  }
+}
+
+// Пишет цену в «Цены» и «Цены_история». Возвращает {error} или {old: прежняя цена}.
+function acceptOffer(vals, who) {
+  var key = String(vals[OF.KEY - 1] || ''), price = Number(vals[OF.NEW - 1]);
+  if (!key) return { error: 'не выбран материал' };
+  if (!(price > 0)) return { error: 'нет новой цены' };
+  var c = readPrices().filter(function (x) { return x.key === key; })[0];
+  if (!c) return { error: 'материала нет в «Цены»' };
+  var invDate = parseRuDate(vals[OF.DATE - 1]) || new Date();
+  if (c.date instanceof Date && c.date.getTime() > invDate.getTime()) {
+    return { error: 'в «Цены» цена от более свежей даты (' + nowStr(c.date).slice(0, 10) + ')' };
+  }
+  var src = [vals[OF.SUPPLIER - 1], vals[OF.NUMBER - 1] ? 'счёт № ' + vals[OF.NUMBER - 1] : 'счёт',
+    'от ' + nowStr(invDate).slice(0, 10)].filter(Boolean).join(', ');
+  book().getSheetByName(SH.PRICES).getRange(c.row, 5, 1, 4).setValues([[price, invDate, src,
+    'принято ' + nowStr() + (who ? ' ' + who : '') + '; было ' + (c.price === '' ? 'пусто' : c.price)]]);
+  appendRow(SH.PRICE_LOG, [nowStr(), key, c.price, price, nowStr(invDate).slice(0, 10), vals[OF.SUPPLIER - 1],
+    vals[OF.NUMBER - 1], who]);
+  return { old: c.price };
+}
+
+// Ручная правка цены прямо в «Цены» — тоже в историю, чтобы было видно, откуда цена.
+function onEditPrices(e) {
+  if (e.range.getColumn() !== 5 || e.range.getNumColumns() > 1 || e.range.getRow() < 2) return;
+  var who = (e.user && e.user.getEmail && e.user.getEmail()) || '';
+  var single = e.range.getNumRows() === 1;
+  appendRow(SH.PRICE_LOG, [nowStr(), single ? e.range.offset(0, -4).getValue() : '(несколько строк)',
+    single && e.oldValue !== undefined ? e.oldValue : '', single && e.value !== undefined ? e.value : '',
+    '', 'вручную в «Цены»', '', who]);
+}
+
+function parseRuDate(v) {
+  if (v instanceof Date) return v;
+  var m = String(v || '').match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  return m ? new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])) : null;
+}
+
+function notifyPrices(res) {
+  var user = String(readSettings().tg_prices || '').replace(/^@/, '');
+  var chat = user && prop('tgchat:' + user.toLowerCase());
+  if (!chat) return;
+  var sh = book().getSheetByName(SH.OFFERS);
+  tg('sendMessage', { chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true,
+    text: '📄 Счёт' + (res.number ? ' № ' + escapeHtml(res.number) : '') + (res.supplier ? ' от ' + escapeHtml(res.supplier) : '') +
+      ': цен на подтверждение — ' + res.offers + '.\n' + sheetUrl(sh) });
+}
+
+function telegramFile(fileId) {
+  var f = tg('getFile', { file_id: fileId });
+  var r = UrlFetchApp.fetch('https://api.telegram.org/file/bot' + prop('TG_TOKEN') + '/' + f.file_path, { muteHttpExceptions: true });
+  if (r.getResponseCode() !== 200) throw new Error('Telegram: файл не скачался (' + r.getResponseCode() + ')');
+  return r.getBlob();
+}
+
+// Папки Drive: «Счета из чата Админ» (рядом с таблицей) и в ней «распознано».
+function invoiceFolders() {
+  var id = readSettings().invoices_folder, root;
+  if (id) root = DriveApp.getFolderById(String(id));
+  else {
+    var parents = DriveApp.getFileById(book().getId()).getParents();
+    var base = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+    root = base.createFolder('Счета из чата Админ');
+    writeSetting('invoices_folder', root.getId());
+  }
+  var sub = root.getFoldersByName('распознано');
+  return { files: root, ocr: sub.hasNext() ? sub.next() : root.createFolder('распознано') };
+}
+
+// Разово: старые счета (экспорт чата из Telegram Desktop, загруженный на Drive) → «Счета_входящие».
+// ID папки — в «Настройки» → invoices_import. Повторный запуск не дублирует файлы.
+function importInvoiceFolder() {
+  var id = readSettings().invoices_import;
+  if (!id) return safeAlert('Укажите ID папки в «Настройки» → invoices_import.');
+  var sh = book().getSheetByName(SH.INVOICES);
+  var have = {};
+  sh.getDataRange().getValues().forEach(function (r) { have[String(r[4])] = true; });
+  var n = 0, stack = [DriveApp.getFolderById(String(id))];
+  while (stack.length) {
+    var folder = stack.pop();
+    var subs = folder.getFolders();
+    while (subs.hasNext()) stack.push(subs.next());
+    var files = folder.getFiles();
+    while (files.hasNext()) {
+      var f = files.next();
+      if (have['drive:' + f.getId()]) continue;
+      sh.appendRow([nowStr(f.getDateCreated()), 'импорт', f.getName(), f.getMimeType(), 'drive:' + f.getId(), '', '', '']);
+      n++;
+    }
+  }
+  safeAlert('Добавлено файлов: ' + n + '. Разбор идёт триггером раз в 10 минут (или запустите processInvoices).');
+}
+
 function logInvoice(msg) {
   var f = msg.document || (msg.photo && msg.photo[msg.photo.length - 1]);
   appendRow(SH.INVOICES, [
@@ -392,6 +723,8 @@ function b24(method, params) {
 // Устанавливаемый триггер «при изменении» (работает от имени установившего; простой onEdit не может слать сообщения).
 function onEditCalc(e) {
   var sh = e.range.getSheet();
+  if (sh.getName() === SH.OFFERS) return onEditOffers(e);
+  if (sh.getName() === SH.PRICES) return onEditPrices(e);
   if (!isCalcSheet(sh)) return;
   var a1 = e.range.getA1Notation();
   var who = (e.user && e.user.getEmail && e.user.getEmail()) || '';
