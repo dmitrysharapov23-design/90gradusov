@@ -5,8 +5,8 @@
 Вес задачи (трудоёмкость): 1 — мелкая, 2 — средняя, 3 — крупная. ДОПУЩЕНИЕ: веса и длительности — экспертная оценка, пересматривать.
 Процент направления = сумма(статус × вес) / сумма(вес).
 
-Запуск: python3 scripts/roadmap.py [путь_к_html_шаблону]
-Пишет docs/07_дорожная_карта.md и roadmap.json рядом с шаблоном (если указан).
+Запуск: python3 scripts/roadmap.py [папка_для_html]
+Пишет docs/07_дорожная_карта.md; с аргументом — ещё roadmap.html (шаблон scripts/roadmap_tpl.html) в указанную папку.
 """
 import json
 import sys
@@ -23,9 +23,9 @@ DIRS = [
     ("S", "Продажи и расчёт", "владелец, Екатерина"),
     ("D", "Проектирование и чертежи", "Василиса"),
     ("M", "Закупки, материалы, подрядчики", "Андреев, владелец"),
-    ("F", "Финансы и зарплаты", "владелец, бухгалтер"),
-    ("I", "Инфраструктура и доступы", "владелец, Severo Studio"),
-    ("L", "Юридическое", "юрист (аутсорс)"),
+    ("F", "Финансы и зарплаты", "владелец"),
+    ("I", "Инфраструктура и доступы", "владелец"),
+    ("L", "Юридическое", "Claude готовит, владелец подписывает"),
 ]
 
 # Задачи: направление, название, статус, вес, неделя старта, длительность (нед.), зависимости (id)
@@ -87,7 +87,7 @@ TASKS = [
     ("I5", "I", "Тех. ответственный, хостинг и база, интернет в цеху", 0, 3, 2, 4, []),
     ("I6", "I", "Коннектор Google Sheets для Claude", 0, 1, 2, 1, []),
     # Юридическое
-    ("L1", "L", "Юр. пакет без юриста: автоинформатор, приказ о каналах, ПДн и РКН", 0, 2, 1, 3, []),
+    ("L1", "L", "Юр. пакет без юриста: автоинформатор, приказ о каналах, ПДн и РКН", 0.5, 2, 1, 3, []),
 ]
 
 
@@ -133,7 +133,7 @@ def build():
     # нагрузка: сколько задач идёт параллельно в каждую неделю
     load = [sum(1 for t in TASKS if t[5] is not None and t[3] < 1 and t[5] <= n < t[5] + t[6])
             for n in range(0, last + 1)]
-    return {"asof": "15.10.2026", "total": total, "dirs": dirs, "tasks": tasks,
+    return {"asof": "16.10.2026", "total": total, "dirs": dirs, "tasks": tasks,
             "weeks": weeks, "load": load, "warnings": warnings}
 
 
@@ -167,9 +167,9 @@ if __name__ == "__main__":
     root = Path(__file__).resolve().parent.parent
     (root / "docs" / "07_дорожная_карта.md").write_text(to_md(r), encoding="utf-8")
     if len(sys.argv) > 1:
-        tpl = Path(sys.argv[1])
+        tpl = root / "scripts" / "roadmap_tpl.html"
         html = tpl.read_text(encoding="utf-8").replace("/*DATA*/null", json.dumps(r, ensure_ascii=False))
-        tpl.with_name("roadmap.html").write_text(html, encoding="utf-8")
+        (Path(sys.argv[1]) / "roadmap.html").write_text(html, encoding="utf-8")
     print(f"Итого {r['total']}%")
     for d in r["dirs"]:
         print(f"  {d['pct']:3d}%  {d['name']}")

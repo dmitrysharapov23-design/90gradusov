@@ -1,0 +1,212 @@
+<title>Карта проекта «90 градусов»</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: цеховой техпаспорт — шапка с итогом, майнд-карта, карточки направлений, диаграмма по неделям */
+:root{
+  --bg:#eef1f3; --panel:#ffffff; --ink:#1b2329; --muted:#5d6b75; --line:#cdd5db;
+  --accent:#c77700; --accent-soft:#f3dfbf; --done:#2f7d4f; --done-soft:#d5ebdc; --todo:#aab5bd;
+  --display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#13181c; --panel:#1b2227; --ink:#e3e8eb; --muted:#93a1ab; --line:#2f3a42;
+  --accent:#f0a030; --accent-soft:#4a3613; --done:#5dbb84; --done-soft:#1d3a29; --todo:#56636c; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#13181c; --panel:#1b2227; --ink:#e3e8eb; --muted:#93a1ab; --line:#2f3a42;
+  --accent:#f0a030; --accent-soft:#4a3613; --done:#5dbb84; --done-soft:#1d3a29; --todo:#56636c; color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.5}
+.wrap{max-width:1240px;margin:0 auto;padding-inline:20px;padding-block:28px 56px;display:flex;flex-direction:column;gap:40px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(28px,4vw,40px);font-weight:700}
+h2{font-size:24px;font-weight:600}
+h3{font-size:17px;font-weight:600}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.lead{color:var(--muted);max-width:68ch;margin:6px 0 0}
+section{display:flex;flex-direction:column;gap:14px}
+.num{font-variant-numeric:tabular-nums;font-family:var(--mono)}
+
+header{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:end}
+.total{display:flex;align-items:center;gap:14px}
+.total b{font-family:var(--display);font-size:56px;line-height:1;font-weight:700}
+.total span{color:var(--muted);font-size:13px;max-width:18ch}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+.s1{background:var(--done)} .s05{background:var(--accent)} .s0{background:transparent;border:1.5px solid var(--todo);box-sizing:border-box}
+
+.scroll{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+#map{display:block;min-width:1100px;width:100%;height:auto}
+#map text{font-family:var(--body);fill:var(--ink)}
+#map .leaf{font-size:12.5px}
+#map .leaf.done{fill:var(--muted)}
+#map .dname{font-family:var(--display);font-size:15px;font-weight:600}
+#map .dpct{font-family:var(--mono);font-size:12px;fill:var(--muted)}
+#map .edge{stroke:var(--line);fill:none;stroke-width:1.5}
+#map .edge.main{stroke:var(--todo);stroke-width:2}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.card .pct{font-family:var(--mono);font-size:20px;font-weight:500}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}
+.bar>div{height:100%;background:var(--done)}
+.owner{font-size:12.5px;color:var(--muted)}
+.next{font-size:13px}
+.next b{font-weight:600;color:var(--accent)}
+
+.gantt{display:grid;min-width:1060px;font-size:12.5px}
+.gantt .h{font-family:var(--mono);font-size:11px;color:var(--muted);padding:6px 0;border-bottom:1px solid var(--line);text-align:center}
+.gantt .lbl{padding:4px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-right:1px solid var(--line)}
+.gantt .grp{grid-column:1/-1;font-family:var(--display);font-weight:600;font-size:14px;padding:12px 10px 4px;border-top:1px solid var(--line)}
+.gantt .b{align-self:center;height:16px;border-radius:3px;margin:2px 1px;background:var(--accent-soft);border:1px solid var(--accent);position:relative;z-index:1}
+.gantt .b.prog{background:var(--accent)}
+.gantt .b.crit{box-shadow:inset 0 -3px 0 var(--ink)}
+.gantt .now{background:var(--accent-soft);opacity:.35}
+.gantt .load{align-self:end;background:var(--todo);margin:0 3px;border-radius:2px 2px 0 0}
+.gantt .lid{font-family:var(--mono);color:var(--muted);margin-right:6px}
+
+.streams{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+.stream{padding:14px 16px;border-left:3px solid var(--accent);background:var(--panel);display:flex;flex-direction:column;gap:6px;min-width:0}
+.stream p{margin:0;font-size:14px}
+.note{font-size:13px;color:var(--muted);max-width:80ch}
+ul.risk{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;max-width:80ch}
+@media (max-width:640px){header{grid-template-columns:1fr}.total b{font-size:44px}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow">Цифровизация · металлообработка · на <span id="asof"></span></div>
+      <h1>Карта проекта «90 градусов»</h1>
+      <p class="lead">Девять направлений, фронт работ по каждому, процент выполнения и график по неделям. Процент считается по весу задач (сделано = 1, начато = 0,5). Веса и сроки — экспертная оценка, пересматриваются по мере работы.</p>
+    </div>
+    <div class="total"><b class="num" id="total"></b><span>общий прогресс по всем направлениям</span></div>
+  </header>
+
+  <section>
+    <div class="legend"><span><i class="s1"></i>сделано</span><span><i class="s05"></i>начато</span><span><i class="s0"></i>не начато</span></div>
+    <div class="scroll"><svg id="map" role="img" aria-label="Майнд-карта направлений проекта"></svg></div>
+  </section>
+
+  <section>
+    <h2>Направления</h2>
+    <div class="cards" id="cards"></div>
+  </section>
+
+  <section>
+    <h2>График по неделям</h2>
+    <p class="lead">Неделя 1 начинается 19.10.2026. Подчёркнутые полосы — критический путь: от него зависит срок всего проекта. Нижняя строка показывает, сколько задач открыто одновременно.</p>
+    <div class="scroll"><div class="gantt" id="gantt"></div></div>
+  </section>
+
+  <section>
+    <h2>Что идёт параллельно</h2>
+    <div class="streams">
+      <div class="stream"><h3>Поток 1. Цех</h3><p>Андреев ведёт табличный пилот на Силов 717. Маршрутные листы уходят в цех до 23.10, разбор журнала — по пятницам скриптом.</p></div>
+      <div class="stream"><h3>Поток 2. Менеджер и звонки</h3><p>Ежедневная сводка уже работает, разбор сигналов идёт без разработки. ВАТС владелец подключает 17–18.10, автоинформатор готов.</p></div>
+      <div class="stream"><h3>Поток 3. Без внешних подрядчиков</h3><p>Роботы воронок смотрим по скриншотам, юридический пакет готовит Claude, штат подтверждает владелец. Внешних ответов ждать не нужно.</p></div>
+      <div class="stream"><h3>Поток 4. Офисные правила</h3><p>Расчёт листом с № сделки, подрядное в расчёте, папки чертежей, условия с подрядчиком Сергеем. Это договорённости, а не разработка: каждое закрывается за 1–2 недели.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Узкие места</h2>
+    <ul class="risk" id="risks">
+      <li><b>Технический ответственный и хостинг (I5).</b> Без них не стартует сервис (P7), а от сервиса зависят пилот на 2–3 заказах, модуль коммуникаций, учёт чертежей и приёмка поставок. Решить до 20.11.</li>
+      <li><b>Передача переписки за рубеж.</b> Ежедневная сводка уже отправляет чаты клиентов в Claude (США). Нужны уведомления в Роскомнадзор или пауза сводки — решает владелец.</li>
+      <li><b>Нагрузка на владельца в недели 1–4:</b> открыто <span class="num" id="peak"></span> задач одновременно. Большинство мелкие, все собраны в чек-листе (документ 10).</li>
+      <li><b>Срок пилота Силов зависит от сроков самого заказа.</b> НЕ ИЗВЕСТНО, когда он идёт в цех; если позже 26.10, берём другой заказ.</li>
+    </ul>
+    <p class="note">Источник: docs/00_паспорт_проекта.md. Данные и расчёт: scripts/roadmap.py, текстовая версия: docs/07_дорожная_карта.md, задачи владельца: docs/10_чек-листы_владельца.md.</p>
+  </section>
+</div>
+
+<script>
+const R = /*DATA*/null;
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const CRIT = new Set(["P4","P5","P6","I5","P7","P8","P9","P10"]);
+$("asof").textContent = R.asof;
+$("total").textContent = R.total + "%";
+$("peak").textContent = Math.max(...R.load.slice(1, 5));
+
+// ── майнд-карта ──
+(function(){
+  const svg = $("map"), W = 1200, cx = W/2, rowH = 19, gap = 18;
+  const right = ["P","C","T","L"], left = ["S","D","M","F","I"];
+  const dirs = Object.fromEntries(R.dirs.map(d => [d.code, d]));
+  const tasksOf = c => R.tasks.filter(t => t.dir === c);
+  const colH = side => side.reduce((h,c) => h + Math.max(tasksOf(c).length, 2)*rowH + gap, -gap);
+  const H = Math.max(colH(right), colH(left)) + 60, cy = H/2;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  let out = "";
+  const ring = (x,y,p) => {
+    const r = 15, c = 2*Math.PI*r;
+    return `<circle cx="${x}" cy="${y}" r="${r}" fill="var(--panel)" stroke="var(--line)" stroke-width="4"/>
+      <circle cx="${x}" cy="${y}" r="${r}" fill="none" stroke="var(--done)" stroke-width="4" stroke-dasharray="${c*p/100} ${c}" transform="rotate(-90 ${x} ${y})"/>`;
+  };
+  function side(codes, dir){
+    let y = (H - colH(codes))/2;
+    const nodeX = cx + dir*215, leafX = cx + dir*330;
+    codes.forEach(c => {
+      const ts = tasksOf(c), h = Math.max(ts.length, 2)*rowH, my = y + h/2, d = dirs[c];
+      out += `<path class="edge main" d="M${cx + dir*92} ${cy} C ${cx + dir*150} ${cy}, ${nodeX - dir*120} ${my}, ${nodeX - dir*20} ${my}"/>`;
+      ts.forEach((t,i) => {
+        const ly = y + i*rowH + rowH/2;
+        out += `<path class="edge" d="M${nodeX + dir*20} ${my} C ${nodeX + dir*60} ${my}, ${leafX - dir*50} ${ly}, ${leafX - dir*10} ${ly}"/>`;
+        const fill = t.status === 1 ? "var(--done)" : t.status > 0 ? "var(--accent)" : "var(--panel)";
+        out += `<circle cx="${leafX}" cy="${ly}" r="4.5" fill="${fill}" stroke="${t.status ? fill : "var(--todo)"}" stroke-width="1.5"/>`;
+        out += `<text class="leaf${t.status === 1 ? " done" : ""}" x="${leafX + dir*10}" y="${ly + 4}" text-anchor="${dir > 0 ? "start" : "end"}">${esc(t.title)}</text>`;
+      });
+      out += ring(nodeX, my, d.pct);
+      out += `<text class="dname" x="${nodeX}" y="${my - 24}" text-anchor="middle">${esc(d.name.split(":")[0])}</text>`;
+      out += `<text class="dpct" x="${nodeX}" y="${my + 4}" text-anchor="middle">${d.pct}</text>`;
+      y += h + gap;
+    });
+  }
+  side(right, 1); side(left, -1);
+  out += `<rect x="${cx-92}" y="${cy-34}" width="184" height="68" rx="6" fill="var(--ink)"/>
+    <text x="${cx}" y="${cy-6}" text-anchor="middle" style="fill:var(--bg);font-family:var(--display);font-size:19px;font-weight:700">90 градусов</text>
+    <text x="${cx}" y="${cy+17}" text-anchor="middle" style="fill:var(--bg);font-family:var(--mono);font-size:12px">готово ${R.total}%</text>`;
+  svg.innerHTML = out;
+})();
+
+// ── карточки ──
+$("cards").innerHTML = R.dirs.map(d => {
+  const nxt = R.tasks.filter(t => t.dir === d.code && t.status < 1).sort((a,b) => a.start - b.start)[0];
+  return `<div class="card"><div class="top"><h3>${esc(d.name)}</h3><span class="pct num">${d.pct}%</span></div>
+    <div class="bar"><div style="width:${d.pct}%"></div></div>
+    <div class="owner">Ведёт: ${esc(d.owner)}</div>
+    ${nxt ? `<div class="next"><b>Дальше:</b> ${esc(nxt.title)} <span class="num" style="color:var(--muted)">(${nxt.from_}–${nxt.to})</span></div>` : ""}</div>`;
+}).join("");
+
+// ── диаграмма ──
+(function(){
+  const g = $("gantt"), N = R.weeks.length;
+  g.style.gridTemplateColumns = `minmax(220px,300px) repeat(${N}, minmax(30px,1fr))`;
+  let html = `<div class="h" style="text-align:left;padding-left:10px">Задача</div>` +
+    R.weeks.map(w => `<div class="h" title="неделя ${w.n}">${w.n === 0 ? "сейчас" : w.n}<br>${w.mon}</div>`).join("");
+  let row = 2;
+  R.dirs.forEach(d => {
+    const ts = R.tasks.filter(t => t.dir === d.code && t.start !== undefined);
+    if (!ts.length) return;
+    html += `<div class="grp" style="grid-row:${row}">${esc(d.name)} <span class="num" style="color:var(--muted);font-weight:400">${d.pct}%</span></div>`; row++;
+    ts.forEach(t => {
+      html += `<div class="lbl" style="grid-row:${row};grid-column:1" title="${esc(t.title)}"><span class="lid">${t.id}</span>${esc(t.title)}</div>`;
+      html += `<div class="now" style="grid-row:${row};grid-column:2"></div>`;
+      html += `<div class="b${t.status > 0 ? " prog" : ""}${CRIT.has(t.id) ? " crit" : ""}" style="grid-row:${row};grid-column:${t.start+2}/span ${t.dur}" title="${t.id}: ${t.from_}–${t.to}"></div>`;
+      row++;
+    });
+  });
+  const mx = Math.max(...R.load);
+  html += `<div class="grp" style="grid-row:${row}">Открытых задач одновременно</div>`; row++;
+  html += `<div class="lbl" style="grid-row:${row};grid-column:1;height:60px"></div>`;
+  R.load.forEach((n,i) => {
+    html += `<div style="grid-row:${row};grid-column:${i+2};display:flex;flex-direction:column;justify-content:flex-end;align-items:stretch;height:60px">
+      <span class="num" style="font-size:10px;text-align:center;color:var(--muted)">${n}</span>
+      <div class="load" style="height:${Math.round(44*n/mx)}px"></div></div>`;
+  });
+  g.innerHTML = html;
+})();
+</script>
