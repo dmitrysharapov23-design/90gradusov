@@ -133,6 +133,20 @@ const inv = L.parseInvoice(['Счет на оплату № 1 от 01.10.2026', 
 assert.strictEqual(inv.items.length, 1);
 assert.strictEqual(inv.skipped.length, 2);
 
+// НДС: мы не плательщики — в цену идёт то, что платим.
+r = L.parseInvoiceLine('1 Лист г/к 2х1250х2500 ст3 0,5 т 80 000,00 40 000,00 22% 8 800,00 48 800,00');
+assert.strictEqual(r.price, 97600); assert.strictEqual(r.sum, 48800); assert.ok(r.vat);
+r = L.parseInvoiceLine('1 Лист г/к 2х1250х2500 ст3 0,5 т 97 600,00 48 800,00'); // НДС внутри цены
+assert.strictEqual(r.price, 97600); assert.ok(!r.vat);
+let v = L.parseInvoice(['1 Лист г/к 2х1250х2500 ст3 0,5 т 80 000,00 40 000,00', '2 Доставка 1 шт 2 000,00 2 000,00',
+  'Итого: 42 000,00', 'НДС 20%: 8 400,00', 'Всего к оплате: 50 400,00'], []);
+assert.strictEqual(v.items[0].price, 96000); assert.ok(v.items[0].vat);
+v = L.parseInvoice(['1 Лист г/к 2х1250х2500 ст3 0,5 т 96 000,00 48 000,00', 'Итого: 48 000,00',
+  'В том числе НДС 20%: 8 000,00', 'Всего к оплате: 48 000,00'], []);
+assert.strictEqual(v.items[0].price, 96000); assert.ok(!v.items[0].vat);
+v = L.parseInvoice([], [[1, 'Лист г/к 2х1250х2500 ст3', 0.5, 'т', 80000, 40000], ['Итого:', 40000], ['Всего к оплате:', 48800]]);
+assert.strictEqual(v.items[0].price, 97600);
+
 // Реальный справочник шаблона: ключи «раздел | материал» не должны повторяться.
 const rowsFile = process.argv[2];
 if (rowsFile) {

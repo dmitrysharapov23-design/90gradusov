@@ -469,6 +469,7 @@ function addOffers(inv, items) {
     var calc = offerCalc(it, m.key, catalog);
     var notes = [];
     if (!it.checked) notes.push('кол-во × цена ≠ сумма — проверьте строку');
+    if (it.vat) notes.push('НДС в счёте сверху — взята цена с НДС');
     if (!m.key) notes.push(m.note);
     else if (calc.price === '') notes.push('впишите новую цену вручную');
     return [inv.date, inv.supplier, inv.number, it.name, it.qty, it.unit, it.price,

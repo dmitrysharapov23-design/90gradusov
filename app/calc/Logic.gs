@@ -151,8 +151,9 @@ function parseInvoiceLine(line) {
     var money = (rest.match(MONEY_RE) || []).map(parseNum);
     if (!name || !/[А-Яа-яA-Za-z]/.test(name) || !(qty > 0) || money.length < 1) { re.lastIndex = m.index + 1; continue; }
     var cand = null;
+    var j = 0;
     for (var i = 0; i < money.length && !cand; i++) {
-      for (var j = i + 1; j < money.length; j++) {
+      for (j = i + 1; j < money.length; j++) {
         if (money[j] > 0 && Math.abs(qty * money[i] - money[j]) / money[j] <= 0.02) {
           cand = { price: money[i], sum: money[j], checked: true }; break;
         }
@@ -160,12 +161,42 @@ function parseInvoiceLine(line) {
     }
     if (!cand) cand = { price: money[0], sum: money[1] || '', checked: false };
     var row = { name: cleanItemName(name), qty: qty, unit: unit, price: cand.price, sum: cand.sum, checked: cand.checked };
+    // НДС сверху: правее суммы есть «сумма с НДС». Мы не плательщики НДС — берём то, что платим.
+    if (cand.checked) {
+      var gross = grossOf(cand.sum, money.slice(j + 1));
+      if (gross) { row.price = round2(gross / qty); row.sum = gross; row.vat = true; }
+    }
     // Сошедшийся вариант главнее; из сошедшихся — с самым длинным названием («Труба 40х20х2 6 м | 120 м …»).
     if (!best || (row.checked && !best.checked) || (row.checked === best.checked && row.checked && row.name.length > best.name.length)) best = row;
     re.lastIndex = m.index + 1;
   }
   if (best && SKIP_LINE.test(best.name)) return null;
   return best;
+}
+
+var VAT_RATES = [0.05, 0.07, 0.1, 0.2, 0.22];
+
+// Сумма с НДС среди чисел правее суммы без НДС: отношение = 1 + ставка (±0,3%).
+function grossOf(net, later) {
+  for (var k = 0; k < later.length; k++) {
+    var r = later[k] / net - 1;
+    for (var v = 0; v < VAT_RATES.length; v++) if (Math.abs(r - VAT_RATES[v]) <= 0.003) return later[k];
+  }
+  return 0;
+}
+
+// Множитель НДС для счёта, где строки без НДС, а он добавлен только в итоге:
+// «Итого: 100 000,00 / НДС 22%: 22 000,00 / Всего к оплате: 122 000,00». Иначе 1.
+function invoiceVatFactor(lines, items) {
+  var text = (lines || []).join('\n').replace(/\u00a0/g, ' ');
+  var money = '(\\d{1,3}(?:[ ]\\d{3})*,\\d{2})';
+  var net = text.match(new RegExp('итого(?!\\s*с\\s*ндс)[^\\d\\n]*' + money, 'i'));
+  var gross = text.match(new RegExp('(?:всего\\s+к\\s+оплате|итого\\s+с\\s+ндс|всего\\s+с\\s+ндс)[^\\d\\n]*' + money, 'i'));
+  if (!net || !gross) return 1;
+  var n = parseNum(net[1]), g = parseNum(gross[1]);
+  if (!(n > 0) || !grossOf(n, [g])) return 1;
+  var sum = items.reduce(function (a, it) { return a + (Number(it.sum) || 0); }, 0);
+  return Math.abs(sum - n) / n <= 0.01 ? g / n : 1; // строки складываются в «Итого» без НДС
 }
 
 // Убирает номер строки и артикул в начале: «1 Лист…», «12. Труба…», «1,00 Лист» (из ячеек таблицы).
@@ -439,6 +470,8 @@ function parseInvoice(lines, tableRows) {
   };
   (tableRows || []).forEach(function (cells) { add(parseInvoiceLine(invoiceCellsToLine(cells))); });
   (lines || []).forEach(function (l) { add(parseInvoiceLine(l)); });
+  var f = items.some(function (it) { return it.vat; }) ? 1 : invoiceVatFactor((lines || []).concat((tableRows || []).map(invoiceCellsToLine)), items.concat(skipped));
+  if (f !== 1) items.forEach(function (it) { it.price = round2(it.price * f); it.sum = round2(it.sum * f); it.vat = true; });
   return { items: items, skipped: skipped };
 }
 
