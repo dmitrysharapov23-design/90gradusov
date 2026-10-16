@@ -20,7 +20,7 @@ function parseCalcRequest(text) {
 function cleanClientName(name, maxLen) {
   maxLen = maxLen || 30;
   var s = String(name || '')
-    .replace(/[«»"'“”„`]/g, ' ')
+    .replace(/[«»"'“”„\x60]/g, ' ')
     .replace(/(^|[\s,])(ООО|ОАО|ЗАО|ПАО|АО|ИП|OOO|LLC)(?=[\s,.]|$)\.?/gi, ' ')
     .replace(/[^0-9A-Za-zА-Яа-яЁё\s.\-]/g, ' ')
     .replace(/\s+/g, ' ')

@@ -2,6 +2,15 @@
 // Секреты — только в свойствах скрипта: TG_TOKEN (бот «90 Расчёты»), B24_WEBHOOK (входящий вебхук Б24, можно позже).
 // Описание процесса — docs/08_автоматизация_просчётов.md, установка — app/calc/README.md.
 
+// Скрипт может быть и привязан к таблице, и отдельным проектом (тогда таблица — по ID).
+var BOOK_ID = '1aSDeqzJZiJEopmCDlf1OBlXvd61KgujujRvuNW6UAaI'; // «Просчет 90гр»
+
+var _book = null;
+function book() {
+  if (!_book) _book = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(BOOK_ID);
+  return _book;
+}
+
 var SH = {
   TEMPLATE_OLD: 'шаблон',
   TEMPLATE: 'шаблон_v2',
@@ -37,13 +46,15 @@ function onOpen() {
 }
 
 function setup() {
-  var ss = SpreadsheetApp.getActive();
+  var ss = book();
   ensureSettings(ss);
   ensurePrices(ss);
   ensureSheet(ss, SH.REGISTRY, REGISTRY_HEAD);
   ensureSheet(ss, SH.EDITS, ['Когда', 'Лист', 'Ячейка', 'Строка', 'Изделие', 'Было', 'Стало', 'Кто', 'Статус листа']);
   ensureSheet(ss, SH.INVOICES, ['Дата', 'От', 'Файл', 'Тип', 'file_id', 'Подпись', 'Сообщение', 'Обработан']);
-  if (!ss.getSheetByName(SH.TEMPLATE)) buildTemplateV2(ss);
+  var tpl = ss.getSheetByName(SH.TEMPLATE);
+  if (!tpl) buildTemplateV2(ss);
+  else setPriceFormulas(tpl, HEADER_ROWS); // переписать формулы цен (например, после смены разделителя)
 
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (['pollTelegram', 'onEditCalc'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
@@ -52,7 +63,7 @@ function setup() {
   ScriptApp.newTrigger('onEditCalc').forSpreadsheet(ss).onEdit().create();
 
   var msg = 'Готово: листы служебные, «' + SH.TEMPLATE + '», триггеры.';
-  if (!prop('TG_TOKEN')) msg += '\nНЕТ токена бота: Расширения → Apps Script → Настройки проекта → Свойства скрипта → TG_TOKEN.';
+  if (!prop('TG_TOKEN')) msg += '\nНЕТ токена бота: редактор Apps Script → Настройки проекта → Свойства скрипта → TG_TOKEN.';
   if (!prop('B24_WEBHOOK')) msg += '\nНет B24_WEBHOOK: без него лист назовётся только по ID сделки, без клиента.';
   safeAlert(msg);
 }
@@ -82,13 +93,14 @@ function ensureSettings(ss) {
   var sh = ss.getSheetByName(SH.SETTINGS);
   if (sh) return sh;
   sh = ensureSheet(ss, SH.SETTINGS, ['Ключ', 'Значение', 'Пояснение']);
-  sh.getRange(2, 1, 6, 3).setValues([
+  sh.getRange(2, 1, 7, 3).setValues([
     ['chat_raschety', '', 'ID чата «Расчеты» — заполнится сам, когда бот увидит сообщение в чате'],
     ['chat_admin', '', 'ID чата «Админ» — заполнится сам'],
-    ['tg_manager', '', 'Telegram-логин Екатерины без @ (проверяет расчёт)'],
-    ['tg_raschetchik', '', 'Telegram-логин Андреева без @ (заполняет расчёт)'],
+    ['tg_manager', 'devyanosto_gradusov', 'Екатерина (проверяет расчёт): логин Telegram без @ или числовой ID из tg_started'],
+    ['tg_raschetchik', '', 'Андреев (заполняет расчёт): логин Telegram без @ или числовой ID из tg_started'],
     ['b24_portal', '90gradusov.bitrix24.ru', 'Адрес портала для ссылок на сделку'],
-    ['chats_seen', '', 'Чаты, где бот видел сообщения (для проверки)']
+    ['chats_seen', '', 'Чаты, где бот видел сообщения (для проверки)'],
+    ['tg_started', '', 'Кто написал боту /start: имя @логин = ID']
   ]);
   sh.setColumnWidth(1, 140).setColumnWidth(2, 220).setColumnWidth(3, 480);
   return sh;
@@ -128,10 +140,8 @@ function buildTemplateV2(ss) {
   t.getRange(2, FIRST_ITEM_COL, 1, LAST_ITEM_COL - FIRST_ITEM_COL + 1).clearContent();
   mats.forEach(function (m) {
     t.getRange(m.row, FIRST_ITEM_COL, 1, LAST_ITEM_COL - FIRST_ITEM_COL + 1).clearContent();
-    var key = m.key.replace(/"/g, '""');
-    t.getRange(m.row, 2).setFormula(
-      '=IFERROR(INDEX(\'' + SH.PRICES + '\'!$E:$E, MATCH("' + key + '", \'' + SH.PRICES + '\'!$A:$A, 0)), "")');
   });
+  setPriceFormulas(t, 0);
 
   // Доп. работы / доп. стоимость по изделию (подряд, покупное) — добавляется к итогу как есть, без коэффициента.
   var totalRow = findRow(t, LABEL.TOTAL);
@@ -166,6 +176,28 @@ function buildTemplateV2(ss) {
   return t;
 }
 
+// Колонка B шаблона: цена из листа «Цены» по ключу «раздел | материал».
+function setPriceFormulas(t, offset) {
+  var sep = argSep();
+  readMaterials(t, offset).forEach(function (m) {
+    var key = m.key.replace(/"/g, '""');
+    t.getRange(m.row, 2).setFormula('=IFERROR(INDEX(\'' + SH.PRICES + '\'!$E:$E' + sep + ' MATCH("' + key + '"' + sep +
+      ' \'' + SH.PRICES + '\'!$A:$A' + sep + ' 0))' + sep + ' "")');
+  });
+}
+
+// Разделитель аргументов формул зависит от локали таблицы: в русской setFormula с запятыми даёт #ERROR!.
+var _sep = null;
+function argSep() {
+  if (_sep) return _sep;
+  var c = book().getSheetByName(SH.SETTINGS).getRange('Z1');
+  c.setFormula('=SUM(1, 2)');
+  SpreadsheetApp.flush();
+  _sep = c.getValue() === 3 ? ',' : ';';
+  c.clearContent();
+  return _sep;
+}
+
 // ---------- Telegram ----------
 
 // Запускается триггером раз в минуту. Вебхук не используем: у веб-приложений Apps Script Telegram получает 302 и шлёт дубли.
@@ -192,9 +224,14 @@ function handleUpdate(u) {
   var text = msg.text || msg.caption || '';
 
   if (chat.type === 'private') {
-    if (/^\/start/.test(text) && msg.from && msg.from.username) {
-      PropertiesService.getScriptProperties()
-        .setProperty('tgchat:' + msg.from.username.toLowerCase(), String(chat.id));
+    if (/^\/start/.test(text) && msg.from) {
+      // Запоминаем и по логину, и по числовому ID: у части людей логина в Telegram нет.
+      var props = PropertiesService.getScriptProperties();
+      props.setProperty('tgchat:' + msg.from.id, String(chat.id));
+      if (msg.from.username) props.setProperty('tgchat:' + msg.from.username.toLowerCase(), String(chat.id));
+      var started = String(readSettings().tg_started || '');
+      var who = personName(msg.from) + (msg.from.username ? ' @' + msg.from.username : '') + ' = ' + msg.from.id;
+      if (started.indexOf(String(msg.from.id)) < 0) writeSetting('tg_started', (started ? started + '; ' : '') + who);
       tg('sendMessage', { chat_id: chat.id, text: 'Готово. Оповещения по расчётам будут приходить сюда.' });
     }
     return;
@@ -221,7 +258,7 @@ function rememberChat(chat) {
 }
 
 function onCalcRequest(req, msg) {
-  var ss = SpreadsheetApp.getActive();
+  var ss = book();
   var names = ss.getSheets().map(function (x) { return x.getName(); });
   var author = personName(msg.from);
   var link = telegramMessageLink(msg.chat.id, msg.message_id);
@@ -414,7 +451,7 @@ function isCalcSheet(sh) {
 }
 
 function updateRegistry(sheetName, fields) {
-  var sh = SpreadsheetApp.getActive().getSheetByName(SH.REGISTRY);
+  var sh = book().getSheetByName(SH.REGISTRY);
   var data = sh.getDataRange().getValues();
   for (var r = 1; r < data.length; r++) {
     if (data[r][2] !== sheetName) continue;
@@ -427,7 +464,7 @@ function updateRegistry(sheetName, fields) {
 }
 
 function appendRow(sheetName, row) {
-  SpreadsheetApp.getActive().getSheetByName(sheetName).appendRow(row);
+  book().getSheetByName(sheetName).appendRow(row);
 }
 
 function findRow(sheet, label) {
@@ -437,7 +474,7 @@ function findRow(sheet, label) {
 }
 
 function readSettings() {
-  var sh = SpreadsheetApp.getActive().getSheetByName(SH.SETTINGS);
+  var sh = book().getSheetByName(SH.SETTINGS);
   var out = {};
   if (!sh) return out;
   sh.getDataRange().getValues().slice(1).forEach(function (r) { if (r[0]) out[r[0]] = r[1]; });
@@ -445,7 +482,7 @@ function readSettings() {
 }
 
 function writeSetting(key, value) {
-  var sh = SpreadsheetApp.getActive().getSheetByName(SH.SETTINGS);
+  var sh = book().getSheetByName(SH.SETTINGS);
   var data = sh.getDataRange().getValues();
   for (var r = 1; r < data.length; r++) if (data[r][0] === key) return sh.getRange(r + 1, 2).setValue(value);
   sh.appendRow([key, value, '']);
@@ -453,7 +490,7 @@ function writeSetting(key, value) {
 
 function prop(k) { return PropertiesService.getScriptProperties().getProperty(k); }
 
-function sheetUrl(sh) { return SpreadsheetApp.getActive().getUrl() + '#gid=' + sh.getSheetId(); }
+function sheetUrl(sh) { return book().getUrl() + '#gid=' + sh.getSheetId(); }
 
 function dealUrl(id) {
   return 'https://' + (readSettings().b24_portal || '90gradusov.bitrix24.ru') + '/crm/deal/details/' + id + '/';
