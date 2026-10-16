@@ -282,7 +282,12 @@ function onCalcRequest(req, msg) {
     return;
   }
 
-  var deal = getDealInfo(req.dealId);
+  var deal, dealError = '';
+  try { deal = getDealInfo(req.dealId); } catch (e) {
+    // Б24 недоступен или у вебхука нет прав — лист всё равно создаём, но говорим об этом в чат.
+    dealError = e.message;
+    deal = { found: null, title: '', client: '' };
+  }
   if (deal.found === false) {
     reply(msg, 'Сделка #' + req.dealId + ' в Б24 не найдена — проверьте номер. Лист не создан.');
     return;
@@ -301,7 +306,8 @@ function onCalcRequest(req, msg) {
   appendRow(SH.REGISTRY, [req.dealId, deal.client || '', name, sheetUrl(sh), STATUS.DRAFT, now, author,
     '', '', '', dealUrl(req.dealId)]);
   reply(msg, 'Лист расчёта «' + name + '» создан: ' + sheetUrl(sh) +
-    (deal.found == null ? '\n(Б24 не подключён — клиент в названии не указан)' : ''));
+    (dealError ? '\n(Не удалось прочитать сделку из Б24: ' + dealError + ' — клиент в названии не указан)' :
+      deal.found == null ? '\n(Б24 не подключён — клиент в названии не указан)' : ''));
   notify('tg_raschetchik', 'Новый расчёт «' + escapeHtml(name) + '».\n' + sheetUrl(sh), msg.chat.id);
 }
 
