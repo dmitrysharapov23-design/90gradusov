@@ -207,7 +207,7 @@ function pollTelegram() {
   if (!lock.tryLock(5000)) return;
   try {
     var offset = Number(prop('TG_OFFSET') || 0);
-    var updates = tg('getUpdates', { offset: offset, timeout: 0, allowed_updates: ['message'] });
+    var updates = tg('getUpdates', { offset: offset, timeout: 0, allowed_updates: ['message', 'my_chat_member'] });
     updates.forEach(function (u) {
       try { handleUpdate(u); } catch (e) { console.error('update ' + u.update_id + ': ' + e.stack); }
       PropertiesService.getScriptProperties().setProperty('TG_OFFSET', String(u.update_id + 1));
@@ -218,6 +218,11 @@ function pollTelegram() {
 }
 
 function handleUpdate(u) {
+  // Бота добавили в группу или изменили его права — запоминаем чат, даже если там ещё не писали.
+  if (u.my_chat_member && u.my_chat_member.chat && u.my_chat_member.chat.type !== 'private') {
+    rememberChat(u.my_chat_member.chat);
+    return;
+  }
   var msg = u.message;
   if (!msg || !msg.chat) return;
   var chat = msg.chat;
@@ -454,7 +459,7 @@ function updateRegistry(sheetName, fields) {
   var sh = book().getSheetByName(SH.REGISTRY);
   var data = sh.getDataRange().getValues();
   for (var r = 1; r < data.length; r++) {
-    if (data[r][2] !== sheetName) continue;
+    if (String(data[r][2]) !== String(sheetName)) continue; // лист «765» Google хранит в реестре как число
     Object.keys(fields).forEach(function (k) {
       var c = REGISTRY_HEAD.indexOf(k);
       if (c >= 0) sh.getRange(r + 1, c + 1).setValue(fields[k]);
