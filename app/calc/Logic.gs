@@ -133,7 +133,7 @@ function calcUnit(unit) {
 }
 
 var SKIP_LINE = /^(итого|всего|в\s*т\.?\s*ч|в\s+том\s+числе|ндс|сумма\s+ндс|без\s+ндс|к\s+оплате)/i;
-var SERVICE_LINE = /(доставк|перевоз|резк|рубк|раскро|погрузк|разгрузк|транспорт|услуг|упаковк|паллет|поддон|тара\b|порезк|гибк|работ[аы]?\b)/i;
+var SERVICE_LINE = /(доставк|перевоз|распил|резк|рубк|раскро|погрузк|разгрузк|транспорт|услуг|упаковк|паллет|поддон|тара\b|порезк|гибк|работ[аы]?\b)/i;
 
 // Деньги в счетах печатаются с копейками: «1 234,56». По этому признаку их можно отделить от количества.
 var MONEY_RE = /\d{1,3}(?:[ \u00a0]\d{3})*,\d{2}(?![\d])/g;
@@ -260,8 +260,10 @@ function parseItemSpec(name) {
   else if (/оцинк|\bоц\b|оц\./.test(s)) spec.metal = 'galv';
   else if (/алюм|\bамг|\bад31/.test(s)) spec.metal = 'al';
   else if (/ст\.?\s?3|сталь|г\/к|х\/к|\bгк\b|\bхк\b|09г2с|черн|\bст\b|эл\.?\s?св|вгп/.test(s)) spec.metal = 'steel';
-  var g = s.match(/\b(430|304|201|321|316l?|439|441)\b/);
+  // «AISI430» пишут и слитно; 08Х17 — российский аналог 430.
+  var g = s.match(/(?:aisi\s*|\b)(430|304|201|321|316l?|439|441)\b/);
   if (g) spec.grade = g[1];
+  else if (/08x17(?!н)/.test(s)) spec.grade = '430';
   var num = '(\\d+(?:\\.\\d+)?)';
   var d3 = s.match(new RegExp(num + 'x' + num + 'x' + num));
   var d2 = s.match(new RegExp(num + 'x' + num + '(?!x|\\d)'));
@@ -364,6 +366,11 @@ function matchMaterial(itemName, catalog) {
   if (hits.length > 1) return { key: '', note: 'несколько вариантов: ' + hits.join('; ') };
   if (it.metal === 'stainless' && it.form === 'sheet' && !it.grade) return { key: '', note: 'нет марки нержавейки' };
   return { key: '', note: 'нет в справочнике — выберите материал' };
+}
+
+// Позиция нужна калькулятору: нашлась в справочнике или это металл (лист, труба, пруток) — тогда материал выберут вручную.
+function isCalcMaterial(itemName, catalog) {
+  return !!matchMaterial(itemName, catalog).key || ['sheet', 'profile', 'round', 'rod'].indexOf(parseItemSpec(itemName).form) >= 0;
 }
 
 // Для прочего (сетка, ЛДСП, ручки): все слова и числа из названия справочника есть в позиции счёта.
@@ -497,6 +504,17 @@ function parseInvoiceBlocks(lines) {
   return out;
 }
 
+// Текст PDF иногда склеивает всю таблицу в одну строку: «1 Лист … 4 шт 10 651,64 42 606,56 2 Лист …».
+// Режем после «сумма» (деньги с копейками), если дальше идёт номер следующей позиции и название.
+function splitItemLines(lines) {
+  var out = [];
+  (lines || []).forEach(function (l) {
+    String(l).replace(/(\d,\d{2})\s+(?=\d{1,3}[.)]?\s+[А-ЯЁA-Zа-яёa-z])/g, '$1\n').split('\n')
+      .forEach(function (x) { out.push(x); });
+  });
+  return out;
+}
+
 // Все строки счёта: строки текста + строки таблиц (ячейки). Услуги и итоги — отдельно.
 function parseInvoice(lines, tableRows) {
   var items = [], skipped = [], seen = {};
@@ -512,7 +530,7 @@ function parseInvoice(lines, tableRows) {
     else items.push(row);
   };
   (tableRows || []).forEach(function (cells) { add(parseInvoiceLine(invoiceCellsToLine(cells))); });
-  (lines || []).forEach(function (l) { add(parseInvoiceLine(l)); });
+  splitItemLines(lines).forEach(function (l) { add(parseInvoiceLine(l)); });
   if (!items.length) parseInvoiceBlocks(lines).forEach(add); // таблица разнесена по строкам
   var f = items.some(function (it) { return it.vat; }) ? 1 : invoiceVatFactor((lines || []).concat((tableRows || []).map(invoiceCellsToLine)), items.concat(skipped));
   if (f !== 1) items.forEach(function (it) { it.price = round2(it.price * f); it.sum = round2(it.sum * f); it.vat = true; });
@@ -526,7 +544,7 @@ if (typeof module !== 'undefined') {
     priceKey: priceKey, telegramMessageLink: telegramMessageLink, escapeHtml: escapeHtml, formatRub: formatRub,
     parseNum: parseNum, normUnit: normUnit, parseInvoiceLine: parseInvoiceLine, parseInvoiceHeader: parseInvoiceHeader,
     parseItemSpec: parseItemSpec, parseCatalogSpec: parseCatalogSpec, matchMaterial: matchMaterial,
-    massPerMeter: massPerMeter, convertPrice: convertPrice, parseInvoice: parseInvoice, parseInvoiceBlocks: parseInvoiceBlocks,
+    massPerMeter: massPerMeter, convertPrice: convertPrice, parseInvoice: parseInvoice, parseInvoiceBlocks: parseInvoiceBlocks, isCalcMaterial: isCalcMaterial,
     invoiceCellsToLine: invoiceCellsToLine
   };
 }

@@ -162,6 +162,26 @@ assert.ok(/0,7х1250х2500/.test(v.items[0].name));
 c = L.convertPrice(v.items[0], cat('листовые металлы | нержавейка 430 0,8мм (м2)'));
 assert.strictEqual(c.price, 1130.35, JSON.stringify(c));
 
+// Вся таблица в одной строке, размеры через «*», НДС только в итоге (формат счёта металлобазы №2, 16.10.2026).
+v = L.parseInvoice(['Счёт на оплату №МП02453МО14 от 15 сентября 2026 г.',
+  '1 Лист AISI 430 2*1500*3000(Нерж. В пленке) 3 шт 16 122,13 48 366,39 2 Труба профильная 20*20*1,5 120 м 62,30 7 475,41',
+  'Итого: 55 841,80 Сумма НДС: 12 285,20 Всего к оплате: 68 127,00'], []);
+assert.strictEqual(v.items.length, 2);
+assert.strictEqual(v.items[0].price, 19669); assert.ok(v.items[0].vat); // 16 122,13 × 1,22
+assert.strictEqual(L.matchMaterial(v.items[1].name, catalog).key, 'труба профильная | 20х20 (метр)');
+assert.strictEqual(L.parseInvoiceHeader('Счёт на оплату №МП02453МО14 от 15 сентября 2026 г.').number, 'МП02453МО14');
+
+assert.ok(L.isCalcMaterial('Лист алюм. АМг5М 3*1500*3000', catalog));       // металл, материал выберут вручную
+assert.ok(L.isCalcMaterial('Сетка ПВЛ 506 20х8 1000х2000', catalog));        // есть в справочнике
+assert.ok(!L.isCalcMaterial('7016;п/э;шагрень;PE7016WG85C20 краска порошковая', catalog));
+assert.ok(!L.isCalcMaterial('Газ аргон в/ч в баллоне (40л)', catalog));
+
+assert.strictEqual(L.parseItemSpec('Лист х/к 2x1500х3000 4N+PE шлиф. 08Х17 AISI430').grade, '430');
+assert.strictEqual(L.parseItemSpec('Лист х/к 2x1500х3000 2В мат. 08Х17').grade, '430');
+assert.strictEqual(key('Лист х/к 0,8x1500х3000 2В мат. 08Х17 AISI430'), 'листовые металлы | нержавейка 430 0,8мм (м2)');
+v = L.parseInvoice(['1 Распил ЛДСП. 1 шт 14 000,00 14 000,00'], []);
+assert.strictEqual(v.items.length, 0); assert.strictEqual(v.skipped.length, 1);
+
 // Реальный справочник шаблона: ключи «раздел | материал» не должны повторяться.
 const rowsFile = process.argv[2];
 if (rowsFile) {

@@ -401,6 +401,7 @@ function processInvoices() {
       SpreadsheetApp.flush();
       if (res.offers) notifyPrices(res);
     }
+    try { rematchOffers(); } catch (e) { console.error('rematchOffers: ' + e.stack); }
   } finally {
     lock.releaseLock();
   }
@@ -432,8 +433,9 @@ function processInvoiceRow(row) {
   if (!kind) return { status: 'пропущено: не счёт (' + (mime || name) + ')' };
 
   var folders = invoiceFolders();
-  var file;
+  var file, saved = String(row[8] || '').match(/\/d\/([\w-]{20,})/); // повторная попытка: файл уже на Диске
   if (fileId.indexOf('drive:') === 0) file = DriveApp.getFileById(fileId.slice(6));
+  else if (saved) file = DriveApp.getFileById(saved[1]);
   else {
     var blob = telegramFile(fileId).setName(dayStr(row[0]) + ' ' + name);
     file = folders.files.createFile(blob);
@@ -475,8 +477,12 @@ function processInvoiceRow(row) {
       ' — проверьте распознанный файл';
     return res;
   }
-  res.offers = addOffers(res, inv.items);
+  // На подтверждение — только то, что есть в справочнике, и металл (лист, труба, пруток); краска, газ и т. п. — мимо.
+  var catalog = readPrices();
+  var mats = inv.items.filter(function (it) { return isCalcMaterial(it.name, catalog); });
+  res.offers = mats.length ? addOffers(res, mats) : 0;
   res.status = 'разобрано ' + nowStr() + ': позиций ' + inv.items.length +
+    (mats.length < inv.items.length ? ', не из справочника (краска, газ и т. п.): ' + (inv.items.length - mats.length) : '') +
     (inv.skipped.length ? ', услуги/доставка пропущены: ' + inv.skipped.length : '');
   return res;
 }
@@ -510,6 +516,26 @@ function addOffers(inv, items) {
   sh.getRange(start, OF.NEW, rows.length, 1).setNumberFormat('#,##0.00');
   sh.getRange(start, OF.CUR, rows.length, 1).setNumberFormat('#,##0.00');
   return rows.length;
+}
+
+// Строки без материала, ждущие решения, заново сверяются со справочником: разбор доработали
+// или в «Цены» добавили материал. Решённые строки и выбранный вручную материал не трогаются.
+function rematchOffers() {
+  var sh = book().getSheetByName(SH.OFFERS), last = sh.getLastRow();
+  if (last < 2) return 0;
+  var vals = sh.getRange(2, 1, last - 1, OFFER_HEAD.length).getValues(), catalog = readPrices(), n = 0;
+  vals.forEach(function (v, i) {
+    if (v[OF.KEY - 1] || !/^ждёт решения/.test(String(v[OF.STATUS - 1]))) return;
+    var it = offerItem(v), m = matchMaterial(it.name, catalog);
+    if (!m.key) return;
+    var calc = offerCalc(it, m.key, catalog), notes = [];
+    if (it.vat) notes.push('НДС в счёте сверху — взята цена с НДС');
+    if (calc.price === '') notes.push('впишите новую цену вручную');
+    sh.getRange(i + 2, OF.KEY, 1, 4).setValues([[m.key, calc.unit, calc.price, calc.how]]);
+    sh.getRange(i + 2, OF.STATUS).setValue('ждёт решения' + (notes.length ? ': ' + notes.join('; ') : ''));
+    n++;
+  });
+  return n;
 }
 
 // Текущая цена — живая ссылка на «Цены»: после принятия одной строки остальные сравниваются с новой ценой.
@@ -657,22 +683,34 @@ function importInvoiceFolder() {
   var id = readSettings().invoices_import;
   if (!id) return safeAlert('Укажите ID папки в «Настройки» → invoices_import.');
   var sh = book().getSheetByName(SH.INVOICES);
-  var have = {};
-  sh.getDataRange().getValues().forEach(function (r) { have[String(r[4])] = true; });
-  var n = 0, stack = [DriveApp.getFolderById(String(id))];
+  // Уже известные файлы: по ID и по имени — бот сохраняет счёт из чата как «дата имя», в экспорте он же как «имя».
+  var have = {}, names = [];
+  sh.getDataRange().getValues().forEach(function (r) {
+    have[String(r[4])] = true;
+    var d = String(r[8] || '').match(/\/d\/([\w-]{20,})/);
+    if (d) have['drive:' + d[1]] = true;
+    if (r[2] && String(r[1]) !== 'импорт') names.push(String(r[2]));
+  });
+  var known = function (name) {
+    return names.some(function (k) { return name === k || name.slice(-k.length - 1) === ' ' + k; });
+  };
+  var rows = [], skipped = 0, stack = [DriveApp.getFolderById(String(id))];
   while (stack.length) {
     var folder = stack.pop();
     var subs = folder.getFolders();
-    while (subs.hasNext()) stack.push(subs.next());
+    while (subs.hasNext()) { var sub = subs.next(); if (sub.getName() !== 'распознано') stack.push(sub); }
     var files = folder.getFiles();
     while (files.hasNext()) {
-      var f = files.next();
+      var f = files.next(), name = f.getName();
       if (have['drive:' + f.getId()]) continue;
-      sh.appendRow([nowStr(f.getDateCreated()), 'импорт', f.getName(), f.getMimeType(), 'drive:' + f.getId(), '', '', '']);
-      n++;
+      // Платёжки и миниатюры из экспорта Telegram — не счета; копии счетов, которые бот уже разобрал, — тоже мимо.
+      if (/_thumb\.jpe?g$|плат[её]жн|поручени/i.test(name) || known(name)) { skipped++; continue; }
+      rows.push([nowStr(f.getDateCreated()), 'импорт', name, f.getMimeType(), 'drive:' + f.getId(), '', '', '']);
     }
   }
-  safeAlert('Добавлено файлов: ' + n + '. Разбор идёт триггером раз в 10 минут (или запустите processInvoices).');
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 8).setValues(rows);
+  safeAlert('Добавлено файлов: ' + rows.length + ', пропущено (платёжки, миниатюры, уже разобранные): ' + skipped +
+    '. Разбор идёт триггером раз в 10 минут (или запустите processInvoices).');
 }
 
 function logInvoice(msg) {
