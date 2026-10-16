@@ -3,7 +3,9 @@
 // Описание процесса — docs/08_автоматизация_просчётов.md, установка — app/calc/README.md.
 
 // Скрипт может быть и привязан к таблице, и отдельным проектом (тогда таблица — по ID).
-var BOOK_ID = '1aSDeqzJZiJEopmCDlf1OBlXvd61KgujujRvuNW6UAaI'; // «Просчет 90гр»
+var BOOK_ID = '191J6lqWOAS0KsM7E4KqtXFKv7hL5WznZpw41EIgjGFk';    // «Расчёты 90 градусов» (рабочий, владелец — Дмитрий)
+var ARCHIVE_ID = '1VI36984Xhtkz7AB8cujKvE_EadZ-U9NW5ppvisBnrw4'; // «Расчёты 90 градусов — архив до 16.10.2026»
+var OLD_ID = '1aSDeqzJZiJEopmCDlf1OBlXvd61KgujujRvuNW6UAaI';     // «Просчет 90гр» (старый, владелец — Тимонт), только чтение
 
 var _book = null;
 function book() {
@@ -14,6 +16,7 @@ function book() {
 var SH = {
   TEMPLATE_OLD: 'шаблон',
   TEMPLATE: 'шаблон_v2',
+  HOME: 'Главная',
   SETTINGS: 'Настройки',
   PRICES: 'Цены',
   REGISTRY: 'Реестр',
@@ -34,7 +37,8 @@ var LABEL = {
 };
 
 var REGISTRY_HEAD = ['ID сделки', 'Клиент', 'Лист', 'Ссылка', 'Статус', 'Создан', 'Автор ТЗ',
-  'Заполнен', 'Утверждён', 'Итого, ₽', 'Сделка Б24'];
+  'Заполнен', 'Утверждён', 'Итого, ₽', 'Сделка Б24', 'Изделия'];
+var STATUS_ARCHIVE = 'Архив';
 
 // ---------- Меню и установка ----------
 
@@ -55,6 +59,7 @@ function setup() {
   var tpl = ss.getSheetByName(SH.TEMPLATE);
   if (!tpl) buildTemplateV2(ss);
   else setPriceFormulas(tpl, HEADER_ROWS); // переписать формулы цен (например, после смены разделителя)
+  if (!ss.getSheetByName(SH.HOME)) buildHome(ss);
 
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (['pollTelegram', 'onEditCalc'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
@@ -296,7 +301,7 @@ function onCalcRequest(req, msg) {
   var name = makeSheetName(req.dealId, client, names);
 
   var sh = ss.getSheetByName(SH.TEMPLATE).copyTo(ss).setName(name);
-  ss.setActiveSheet(sh); ss.moveActiveSheet(2);
+  ss.setActiveSheet(sh); ss.moveActiveSheet(3); // после «Главной» и «Реестра»
   sh.getRange(CELL.NAME).setValue(name + (deal.title ? ' — ' + deal.title : ''));
   sh.getRange(CELL.STATUS).setValue(STATUS.DRAFT);
   sh.getRange(CELL.DEAL).setValue(dealUrl(req.dealId));
@@ -407,7 +412,7 @@ function onStatusChange(sh, oldStatus, newStatus, who) {
   var now = nowStr(), name = escapeHtml(sh.getName()), url = sheetUrl(sh);
   var total = calcTotal(sh);
   appendHistory(sh, newStatus + ' ' + now + (who ? ' (' + who + ')' : ''));
-  var upd = { 'Статус': newStatus, 'Итого, ₽': total };
+  var upd = { 'Статус': newStatus, 'Итого, ₽': total, 'Изделия': calcItems(sh, ITEM_ROW) };
 
   if (newStatus === STATUS.FILLED) {
     upd['Заполнен'] = now;
@@ -441,6 +446,12 @@ function protectSheet(sh, description) {
   p.addEditor(Session.getEffectiveUser());
   p.removeEditors(p.getEditors());
   if (p.canDomainEdit()) p.setDomainEdit(false);
+}
+
+// Названия изделий через запятую — для поиска на «Главной».
+function calcItems(sh, row) {
+  return sh.getRange(row, FIRST_ITEM_COL, 1, LAST_ITEM_COL - FIRST_ITEM_COL + 1).getValues()[0]
+    .map(function (v) { return String(v).trim(); }).filter(Boolean).join(', ');
 }
 
 function calcTotal(sh) {
@@ -479,6 +490,7 @@ function appendRow(sheetName, row) {
 }
 
 function findRow(sheet, label) {
+  if (sheet.getLastRow() < 1) return 0; // пустой лист
   var vals = sheet.getRange(1, 1, sheet.getLastRow(), 1).getValues();
   for (var i = 0; i < vals.length; i++) if (String(vals[i][0]).trim() === label) return i + 1;
   return 0;
@@ -519,4 +531,71 @@ function colLetter(c) {
 
 function safeAlert(msg) {
   try { SpreadsheetApp.getUi().alert(msg); } catch (e) { console.log(msg); }
+}
+
+// ---------- Новый файл: перенос, архив, «Главная» ----------
+
+// Разовый перенос (16.10.2026): из старого файла — служебные листы и шаблон, старые расчёты остаются в архиве,
+// в «Реестр» попадает их список со ссылками. Старый файл не меняется.
+function migrateToNewFile() {
+  var old = SpreadsheetApp.openById(OLD_ID), dst = book(), arc = SpreadsheetApp.openById(ARCHIVE_ID);
+  var initial = dst.getSheets();
+  [SH.PRICES, SH.SETTINGS, SH.TEMPLATE, SH.EDITS, SH.INVOICES].forEach(function (n) {
+    if (dst.getSheetByName(n)) return;
+    old.getSheetByName(n).copyTo(dst).setName(n);
+  });
+  setPriceFormulas(dst.getSheetByName(SH.TEMPLATE), HEADER_ROWS); // ссылки на «Цены» — уже внутри нового файла
+  var reg = ensureSheet(dst, SH.REGISTRY, REGISTRY_HEAD);
+  if (reg.getLastRow() < 2) {
+    var rows = archiveIndex(arc);
+    if (rows.length) reg.getRange(2, 1, rows.length, REGISTRY_HEAD.length).setValues(rows);
+  }
+  buildHome(dst);
+  initial.forEach(function (sh) { if (dst.getSheets().length > 1 && sh.getLastRow() === 0) dst.deleteSheet(sh); });
+  dst.setActiveSheet(dst.getSheetByName(SH.REGISTRY)); dst.moveActiveSheet(2);
+  dst.setActiveSheet(dst.getSheetByName(SH.HOME)); dst.moveActiveSheet(1);
+  console.log('Перенос готов: в реестре ' + (reg.getLastRow() - 1) + ' строк архива.');
+}
+
+// Строки «Реестра» для старых расчётов из архива: название листа, итог, изделия, ссылка.
+function archiveIndex(arc) {
+  var skip = /^(шаблон|шаблон_v2|Цены|Настройки|Реестр|Журнал_правок|Счета_входящие|Главная|765|715_.*)$/i;
+  var url = arc.getUrl();
+  var out = [];
+  arc.getSheets().forEach(function (sh) {
+    var name = sh.getName();
+    if (skip.test(name.trim())) return;
+    var r = findRow(sh, LABEL.TOTAL);
+    if (!r) return; // не расчёт («Лист2» и т. п.)
+    var total = Number(sh.getRange(r, TOTAL_COL).getValue()) || 0;
+    out.push(['', name.trim(), name.trim(), url + '#gid=' + sh.getSheetId(), STATUS_ARCHIVE, '', '', '', '',
+      total, '', calcItems(sh, 2)]);
+  });
+  return out;
+}
+
+// «Главная»: поиск по реестру (номер сделки, клиент, лист, изделие) и сводка по статусам.
+function buildHome(ss) {
+  var h = ss.getSheetByName(SH.HOME) || ss.insertSheet(SH.HOME, 0);
+  h.clear();
+  var sep = argSep(), R = "'" + SH.REGISTRY + "'!";
+  var hay = R + 'A2:A&" "&' + R + 'B2:B&" "&' + R + 'C2:C&" "&' + R + 'L2:L';
+  h.getRange('A1').setValue('Расчёты 90 градусов').setFontSize(14).setFontWeight('bold');
+  h.getRange('A3').setValue('Поиск').setFontWeight('bold');
+  h.getRange('B3').setBackground('#fff8e1').setBorder(true, true, true, true, false, false);
+  h.getRange('C3').setValue('номер сделки, клиент или изделие; пусто — все текущие расчёты').setFontColor('#777777');
+  var cnt = function (st) { return '=COUNTIF(' + R + 'E2:E' + sep + ' "' + st + '")'; };
+  h.getRange('A5:B9').setValues([
+    ['Черновик', ''], ['Заполнено', ''], ['На доработку', ''], ['Утверждено', ''], ['Архив', '']]);
+  ['Черновик', 'Заполнено', 'На доработку', 'Утверждено', STATUS_ARCHIVE].forEach(function (st, i) {
+    h.getRange(5 + i, 2).setFormula(cnt(st));
+  });
+  h.getRange('A11:L11').setValues([REGISTRY_HEAD]).setFontWeight('bold').setBackground('#e3f2fd');
+  h.getRange('A12').setFormula('=IF($B$3=""' + sep +
+    ' IFERROR(FILTER(' + R + 'A2:L' + sep + ' ' + R + 'E2:E<>"' + STATUS_ARCHIVE + '"' + sep + ' ' + R + 'C2:C<>"")' + sep + ' "Текущих расчётов нет")' + sep +
+    ' IFERROR(FILTER(' + R + 'A2:L' + sep + ' ISNUMBER(SEARCH($B$3' + sep + ' ' + hay + ')))' + sep + ' "Ничего не найдено"))');
+  h.setFrozenRows(11);
+  h.setColumnWidth(1, 90).setColumnWidth(2, 200).setColumnWidth(3, 220).setColumnWidth(4, 120).setColumnWidth(12, 300);
+  h.getRange('J12:J').setNumberFormat('#,##0');
+  return h;
 }
