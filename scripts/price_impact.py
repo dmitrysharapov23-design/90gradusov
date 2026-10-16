@@ -5,7 +5,9 @@
 покраска и логистика — постоянные суммы на заказ, от цен материалов не зависят.
 Выход: по каждому листу — итог было/стало, изменение, и какие коэффициенты сохранили бы прежний итог.
 
-Запуск: python3 scripts/price_impact.py [имя листа ...]
+Запуск: python3 scripts/price_impact.py [--new-k] [имя листа ...]
+  --new-k — заодно заменить коэффициенты по умолчанию на новые (листы 4 → 6,5, профиль 7 → 8);
+  --scale-all — умножить все коэффициенты в той же пропорции (листы ×1,625, профиль ×8/7).
 """
 import sys
 import openpyxl
@@ -29,6 +31,11 @@ DEFAULT = ['Анар Суши бар Сургут', 'ИП Обинов Чайк�
 
 FIRST_COL, LAST_COL, TOTAL_COL = 3, 21, 22  # C…U — изделия, V — итог
 
+# Коэффициенты по умолчанию: старые и новые (решение 16.10.2026). Меняются только изделия со старым значением по умолчанию —
+# коэффициенты, которые расчётчик выставил вручную, остаются.
+OLD_K = {'sheets': 4, 'prof': 7}
+NEW_K = {'sheets': 6.5, 'prof': 8}
+
 
 def labels(ws):
     out = {}
@@ -43,7 +50,7 @@ def num(v):
     return v if isinstance(v, (int, float)) else 0
 
 
-def analyse(ws):
+def analyse(ws, new_k=False, scale_all=False):
     lab = labels(ws)
     r_paint = lab['Красится?']
     r_kprof, r_klist = lab['Коэффициент профиля'], lab['Коэффициент листов']
@@ -74,11 +81,13 @@ def analyse(ws):
             if not q:
                 continue
             k = num(ws.cell(r_klist if is_sheet else r_kprof, c).value)
+            grp = 'sheets' if is_sheet else 'prof'
+            k2 = k * NEW_K[grp] / OLD_K[grp] if scale_all else NEW_K[grp] if new_k and k == OLD_K[grp] else k
             qty_total += q
             if is_sheet:
-                sheets_old += q * old * k; sheets_new += q * new * k; base_sheets += q * new
+                sheets_old += q * old * k; sheets_new += q * new * k2; base_sheets += q * new
             else:
-                prof_old += q * old * k; prof_new += q * new * k; base_prof += q * new
+                prof_old += q * old * k; prof_new += q * new * k2; base_prof += q * new
         if qty_total and new != old:
             changed.append((section, a, qty_total, old, new))
 
@@ -101,12 +110,15 @@ def rub(x):
 
 
 def main():
-    names = sys.argv[1:] or DEFAULT
+    args = sys.argv[1:]
+    new_k = '--new-k' in args          # новые коэффициенты только вместо значений по умолчанию (4 и 7)
+    scale_all = '--scale-all' in args  # все коэффициенты в той же пропорции (3 → 4,9; 6 → 6,9 и т. д.)
+    names = [a for a in args if not a.startswith('--')] or DEFAULT
     wb = openpyxl.load_workbook(BOOK, data_only=True)
     sum_old = sum_new = 0.0
     for name in names:
         ws = wb[name] if name in wb.sheetnames else next(s for s in wb.worksheets if s.title.strip() == name.strip())
-        r = analyse(ws)
+        r = analyse(ws, new_k, scale_all)
         sum_old += r['total_old']; sum_new += r['total_new']
         print(f'\n== {ws.title.strip()}')
         print(f'итого было {rub(r["total_old"])} ₽, стало {rub(r["total_new"])} ₽, '

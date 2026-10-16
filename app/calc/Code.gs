@@ -54,6 +54,18 @@ var DECISION = { ACCEPT: 'Принять', REJECT: 'Отклонить' };
 var PRICE_LOG_HEAD = ['Когда', 'Ключ', 'Было, ₽', 'Стало, ₽', 'Дата счёта', 'Поставщик', '№ счёта', 'Кто'];
 var BIG_CHANGE = 0.3; // изменение больше ±30% подсвечивается — проверить, не ошибка ли
 
+// Коэффициенты по умолчанию (решение 16.10.2026): цены материалов теперь закупочные из счетов (ниже старых на 25–50%),
+// поэтому коэффициенты подняты, чтобы итоги остались на прежнем уровне. Подсказки в листе — в той же пропорции.
+var K_DEFAULT = { PROFILE: 8, SHEETS: 6.5 };
+var K_HINTS = [
+  ['нерж труба кф 6', 'нерж труба кф 7'],
+  ['сталь труба кф 8', 'сталь труба кф 9'],
+  ['лист без обработки нерж кф 3', 'лист без обработки нерж кф 5'],
+  ['если 3мм и более то кф 2,5', 'если 3мм и более то кф 4'],
+  ['лист сталь кф 5', 'лист сталь кф 8'],
+  ['если 8мм то кф 4', 'если 8мм то кф 6,5']
+];
+
 // ---------- Меню и установка ----------
 
 function onOpen() {
@@ -208,7 +220,35 @@ function buildTemplateV2(ss) {
   t.getRange('B4:V4').setFontColor('#777777').setFontSize(9);
   t.setRowHeight(2, 60);
   t.setFrozenRows(HEADER_ROWS + 2);
+  setTemplateCoefficients(t);
   return t;
+}
+
+// Применяет K_DEFAULT к шаблону один раз после смены значений (вызывается из триггера processInvoices).
+function ensureTemplateCoefficients() {
+  var want = K_DEFAULT.PROFILE + '/' + K_DEFAULT.SHEETS, props = PropertiesService.getScriptProperties();
+  if (props.getProperty('K_DEFAULT_APPLIED') === want) return;
+  setTemplateCoefficients();
+  props.setProperty('K_DEFAULT_APPLIED', want);
+}
+
+// Коэффициенты по умолчанию и подсказки в «шаблон_v2». Новые расчёты получают их при создании листа;
+// уже созданные листы и архив не меняются. После смены K_DEFAULT применяется сам при ближайшем processInvoices.
+function setTemplateCoefficients(t) {
+  t = t || book().getSheetByName(SH.TEMPLATE);
+  var n = LAST_ITEM_COL - FIRST_ITEM_COL + 1;
+  [['Коэффициент профиля', K_DEFAULT.PROFILE], ['Коэффициент листов', K_DEFAULT.SHEETS]].forEach(function (x) {
+    var r = findRow(t, x[0]);
+    if (!r) throw new Error('В шаблоне нет строки «' + x[0] + '»');
+    var row = []; for (var i = 0; i < n; i++) row.push(x[1]);
+    t.getRange(r, FIRST_ITEM_COL, 1, n).setValues([row]);
+  });
+  var hints = 0;
+  K_HINTS.forEach(function (h) {
+    t.createTextFinder(h[0]).matchEntireCell(true).findAll().forEach(function (c) { c.setValue(h[1]); hints++; });
+  });
+  console.log('Коэффициенты по умолчанию: профиль ' + K_DEFAULT.PROFILE + ', листы ' + K_DEFAULT.SHEETS +
+    '; подсказок обновлено: ' + hints);
 }
 
 // Колонка B шаблона: цена из листа «Цены» по ключу «раздел | материал».
@@ -402,6 +442,7 @@ function processInvoices() {
       if (res.offers) notifyPrices(res);
     }
     try { rematchOffers(); } catch (e) { console.error('rematchOffers: ' + e.stack); }
+    try { ensureTemplateCoefficients(); } catch (e) { console.error('ensureTemplateCoefficients: ' + e.stack); }
   } finally {
     lock.releaseLock();
   }
