@@ -87,16 +87,19 @@ def tz_text(tz: TZ) -> str:
 
 
 def decide(client: anthropic.Anthropic, transcript: str, context: str) -> Decision:
-    resp = client.beta.messages.parse(
+    resp = client.beta.messages.create(
         model=MODEL,
         max_tokens=16000,
         system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": f"{context}\n\nПереписка:\n{transcript}"}],
-        output_format=Decision,
-        output_config={"effort": "medium"},
+        output_config={
+            "effort": "medium",
+            "format": {"type": "json_schema", "schema": anthropic.transform_schema(Decision.model_json_schema())},
+        },
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
     )
-    if resp.stop_reason == "refusal" or resp.parsed_output is None:
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    if resp.stop_reason != "end_turn" or not text:
         raise RuntimeError(f"Claude не дал решения: stop_reason={resp.stop_reason}")
-    return resp.parsed_output
+    return Decision.model_validate_json(text)
