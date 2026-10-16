@@ -243,7 +243,8 @@ def create(b24, req, draft):
     if req["phone"]:
         contact["PHONE"] = [{"VALUE": req["phone"], "VALUE_TYPE": "WORK"}]
     if req["tg"]:
-        contact["COMMENTS"] = f"Telegram: {req['tg']}"
+        # по справке Wazzup: ник с @ в этом поле контакта позволяет открыть Telegram-чат из карточки Б24
+        contact["UF_CRM_TELEGRAMUSERNAME_WZ"] = req["tg"]
     cid = b24.call("crm.contact.add", {"fields": contact})
     if req["source"] == "site":
         b24.call("crm.lead.update", {"id": req["lead_id"], "fields": {"CONTACT_ID": cid}})
@@ -285,6 +286,7 @@ def mark_dup(b24, req, dups):
 
 STATE = ROOT / "data" / "leads" / "inbound_state.json"
 LOG = ROOT / "data" / "leads" / "inbound.log"
+HEARTBEAT = ROOT / "data" / "leads" / "inbound_heartbeat"   # проверяет scripts/check_inbound_leads.sh
 
 
 def log(msg):
@@ -319,6 +321,7 @@ def main():
                                                  "UF_CRM_TELEGRAMID_WZ", "UF_CRM_TELEGRAMUSERNAME_WZ", "CONTACT_ID"]}) or []
     reqs += [from_site(l) for l in site if not l.get("CONTACT_ID")]
     if args.create:
+        HEARTBEAT.write_text(datetime.now().astimezone().isoformat(), encoding="utf-8")  # для сторожа
         reqs = [r for r in reqs if r["src_id"] not in state["done"]]
     reqs.sort(key=lambda r: r["date"])
     if args.create and not reqs:
