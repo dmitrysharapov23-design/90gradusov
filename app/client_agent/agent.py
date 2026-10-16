@@ -154,7 +154,8 @@ def process(lead, msgs, st, now, source, decide_fn, out, ignore_tg=frozenset()):
         return
 
     if st.get("status") is None:
-        if lead.get(TG_ID_LEAD) in ignore_tg:
+        username = "@" + (lead.get("UF_CRM_TELEGRAMUSERNAME_WZ") or "").lstrip("@").lower()
+        if lead.get(TG_ID_LEAD) in ignore_tg or username in ignore_tg:
             st.update(status="skip", note="свой аккаунт (ignore_tg.txt)")
             log(f"лид {lid}: {st['note']}")
             return
@@ -276,7 +277,8 @@ def main():
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
 
     ignore_path = ROOT / "data" / "client_agent" / "ignore_tg.txt"  # свои аккаунты: бот, сотрудники, партнёры — по одному Telegram ID в строке
-    ignore_tg = {x.split("#")[0].strip() for x in ignore_path.read_text(encoding="utf-8").splitlines()} if ignore_path.exists() else set()
+    ignore_tg = {x.split("#")[0].strip().lower() for x in ignore_path.read_text(encoding="utf-8").splitlines()} if ignore_path.exists() else set()
+    ignore_tg.discard("")
     leads = source.leads(now)
     comments = source.comments([l["ID"] for l in leads]) if leads else {}
     out = []
