@@ -147,6 +147,21 @@ assert.strictEqual(v.items[0].price, 96000); assert.ok(!v.items[0].vat);
 v = L.parseInvoice([], [[1, 'Лист г/к 2х1250х2500 ст3', 0.5, 'т', 80000, 40000], ['Итого:', 40000], ['Всего к оплате:', 48800]]);
 assert.strictEqual(v.items[0].price, 97600);
 
+// OCR разнёс ячейки по строкам (формат счёта металлобазы, 16.10.2026).
+const ocr = ['Счет No 3296355', '', 'от 28 Сентября 2026 г.', 'Склад Цена с НДС Кол-во', 'Ед.', 'Сумма, руб',
+  '1 сталь нержав х/к б/н лист AISI 430 (08Х17)', '|ВА+РЕ 0,7х1250х2500', 'BX1H', '183 498', '0,175', 'Т',
+  '32 112,15/10 шт.', '2 Поддоны 1250х2500', 'BX1H', '3 Автоперевозка', '2300', '6 800', '1', 'шт', '2 300,00',
+  '1 шт', '6 800,00', 'Итого:', '0,22 тонн', 'В том числе НДС:', '41 212,15 руб. 7 431,70 руб.', 'Итого к оплате:'];
+const hb = L.parseInvoiceHeader(ocr.join('\n'));
+assert.strictEqual(hb.number, '3296355'); assert.strictEqual(hb.date, '28.09.2026');
+v = L.parseInvoice(ocr, []);
+assert.strictEqual(v.items.length, 1); assert.strictEqual(v.skipped.length, 1); // автоперевозка — услуга
+assert.deepStrictEqual([v.items[0].qty, v.items[0].price, v.items[0].sum, v.items[0].unit], [0.175, 183498, 32112.15, 'Т']);
+assert.ok(/0,7х1250х2500/.test(v.items[0].name));
+// Выбран материал другой толщины: ₽/т пересчитывается по толщине материала (0,8), а не листа из счёта (0,7).
+c = L.convertPrice(v.items[0], cat('листовые металлы | нержавейка 430 0,8мм (м2)'));
+assert.strictEqual(c.price, 1130.35, JSON.stringify(c));
+
 // Реальный справочник шаблона: ключи «раздел | материал» не должны повторяться.
 const rowsFile = process.argv[2];
 if (rowsFile) {

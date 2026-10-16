@@ -385,11 +385,16 @@ function processInvoices() {
     var sh = book().getSheetByName(SH.INVOICES);
     var data = sh.getDataRange().getValues();
     for (var r = 1; r < data.length && Date.now() - started < 4 * 60 * 1000; r++) {
-      if (data[r][7] || !data[r][4]) continue;
+      if (!data[r][4]) continue;
+      // Ошибку (нет доступа, сбой Telegram) пробуем ещё раз, всего до 3 попыток.
+      var st = String(data[r][7] || ''), err = st.match(/^ошибка(?: \(попытка (\d+)\))?/);
+      if (st && !err) continue;
+      var tries = err ? Number(err[1] || 1) : 0;
+      if (tries >= 3) continue;
       var res;
       try { res = processInvoiceRow(data[r]); } catch (e) {
         console.error('счёт, строка ' + (r + 1) + ': ' + e.stack);
-        res = { status: 'ошибка: ' + e.message };
+        res = { status: 'ошибка (попытка ' + (tries + 1) + '): ' + e.message };
       }
       sh.getRange(r + 1, 8, 1, 8).setValues([[res.status, res.fileUrl || '', res.ocrUrl || '', res.supplier || '',
         res.number || '', res.date || '', res.items == null ? '' : res.items, res.offers == null ? '' : res.offers]]);
@@ -399,6 +404,23 @@ function processInvoices() {
   } finally {
     lock.releaseLock();
   }
+}
+
+// Запуск из редактора, если счёт упал с «нет разрешения»: заново спрашивает все доступы (Google показывает окно,
+// где нужно отметить все галочки, включая Google Диск), сбрасывает ошибки и «нет позиций» в «Счета_входящие»
+// (например, после доработки разбора) и разбирает счета заново.
+function retryInvoices() {
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  DriveApp.getRootFolder(); // проверка доступа к Диску: без него здесь будет ошибка
+  var sh = book().getSheetByName(SH.INVOICES);
+  var col = sh.getRange(1, 8, Math.max(sh.getLastRow(), 1), 1).getValues();
+  var n = 0;
+  for (var r = 1; r < col.length; r++) {
+    if (/^(ошибка|нет позиций)/.test(String(col[r][0]))) { sh.getRange(r + 1, 8).clearContent(); n++; }
+  }
+  SpreadsheetApp.flush();
+  console.log('Сброшено ошибок: ' + n);
+  processInvoices();
 }
 
 // Строка «Счета_входящие» → {status, fileUrl, ocrUrl, supplier, number, date, items, offers}.
@@ -413,7 +435,7 @@ function processInvoiceRow(row) {
   var file;
   if (fileId.indexOf('drive:') === 0) file = DriveApp.getFileById(fileId.slice(6));
   else {
-    var blob = telegramFile(fileId).setName(String(row[0]).slice(0, 10) + ' ' + name);
+    var blob = telegramFile(fileId).setName(dayStr(row[0]) + ' ' + name);
     file = folders.files.createFile(blob);
   }
   var conv = Drive.Files.create({
@@ -445,7 +467,7 @@ function processInvoiceRow(row) {
   var inv = parseInvoice(lines, tableRows);
   var res = {
     fileUrl: file.getUrl(), ocrUrl: 'https://drive.google.com/open?id=' + conv.id,
-    supplier: head.supplier, number: head.number, date: head.date || String(row[0]).slice(0, 10),
+    supplier: head.supplier, number: head.number, date: head.date || dayStr(row[0]),
     items: inv.items.length, offers: 0, caption: row[5], link: row[6]
   };
   if (!inv.items.length) {
@@ -457,6 +479,11 @@ function processInvoiceRow(row) {
   res.status = 'разобрано ' + nowStr() + ': позиций ' + inv.items.length +
     (inv.skipped.length ? ', услуги/доставка пропущены: ' + inv.skipped.length : '');
   return res;
+}
+
+// Ячейка даты из таблицы (Date или «dd.MM.yyyy HH:mm») → «dd.MM.yyyy».
+function dayStr(v) {
+  return v instanceof Date ? nowStr(v).slice(0, 10) : String(v || '').slice(0, 10);
 }
 
 function addOffers(inv, items) {

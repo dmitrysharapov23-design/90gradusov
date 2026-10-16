@@ -133,7 +133,7 @@ function calcUnit(unit) {
 }
 
 var SKIP_LINE = /^(итого|всего|в\s*т\.?\s*ч|в\s+том\s+числе|ндс|сумма\s+ндс|без\s+ндс|к\s+оплате)/i;
-var SERVICE_LINE = /(доставк|резк|рубк|раскро|погрузк|разгрузк|транспорт|услуг|упаковк|паллет|поддон|тара\b|порезк|гибк|работ[аы]?\b)/i;
+var SERVICE_LINE = /(доставк|перевоз|резк|рубк|раскро|погрузк|разгрузк|транспорт|услуг|упаковк|паллет|поддон|тара\b|порезк|гибк|работ[аы]?\b)/i;
 
 // Деньги в счетах печатаются с копейками: «1 234,56». По этому признаку их можно отделить от количества.
 var MONEY_RE = /\d{1,3}(?:[ \u00a0]\d{3})*,\d{2}(?![\d])/g;
@@ -190,8 +190,8 @@ function grossOf(net, later) {
 function invoiceVatFactor(lines, items) {
   var text = (lines || []).join('\n').replace(/\u00a0/g, ' ');
   var money = '(\\d{1,3}(?:[ ]\\d{3})*,\\d{2})';
-  var net = text.match(new RegExp('итого(?!\\s*с\\s*ндс)[^\\d\\n]*' + money, 'i'));
-  var gross = text.match(new RegExp('(?:всего\\s+к\\s+оплате|итого\\s+с\\s+ндс|всего\\s+с\\s+ндс)[^\\d\\n]*' + money, 'i'));
+  var net = text.match(new RegExp('итого(?!\\s*(?:с\\s*ндс|к\\s*оплате))[^\\d\\n]*' + money, 'i'));
+  var gross = text.match(new RegExp('(?:(?:всего|итого)\\s+к\\s+оплате|(?:итого|всего)\\s+с\\s+ндс)[^\\d\\n]*' + money, 'i'));
   if (!net || !gross) return 1;
   var n = parseNum(net[1]), g = parseNum(gross[1]);
   if (!(n > 0) || !grossOf(n, [g])) return 1;
@@ -227,13 +227,13 @@ var MONTHS = { 'январ': 1, 'феврал': 2, 'март': 3, 'апрел': 
 function parseInvoiceHeader(text) {
   var t = String(text || '').replace(/\u00a0/g, ' ');
   var out = { number: '', date: '', supplier: '' };
-  var m = t.match(/сч[её]т(?:[\s-]*(?:на\s+оплату|оферта|-?фактура))?\s*№\s*([^\s,]+)\s+от\s+(\d{1,2})[\s.]+([а-яё]+|\d{1,2})[\s.]+(\d{4})/i);
+  var m = t.match(/сч[её]т(?:[\s-]*(?:на\s+оплату|оферта|-?фактура))?\s*(?:№|No|N)\s*([^\s,]+)\s+от\s+(\d{1,2})[\s.]+([а-яё]+|\d{1,2})[\s.]+(\d{4})/i);
   if (m) {
     out.number = m[1];
     var mon = /^\d+$/.test(m[3]) ? Number(m[3]) : monthNum(m[3]);
     if (mon) out.date = pad2(m[2]) + '.' + pad2(mon) + '.' + m[4];
   }
-  var s = t.match(/(?:поставщик|продавец|исполнитель)[^:\n]*:\s*([^\n]+)/i);
+  var s = t.match(/(?:поставщик|продавец)[^:\n]*:\s*([^\n]+)/i); // «Исполнитель:» — это менеджер, не фирма
   if (s) out.supplier = s[1].split(/,\s*(?:ИНН|КПП|\d{6})/i)[0].trim();
   if (!out.supplier) {
     var orgs = t.match(/(?:ООО|АО|ПАО|ЗАО|ИП)\s*[«"][^»"\n]+[»"]|ИП\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.\s?[А-ЯЁ]\./g) || [];
@@ -438,11 +438,12 @@ function convertPrice(row, target) {
   return { price: '', how: 'нет пересчёта ' + unitRu(from) + ' → ' + unitRu(to) };
 }
 
-// Размеры из счёта главнее (там есть стенка), недостающие — из справочника.
+// Размеры выбранного материала главнее: цена за тонну почти не зависит от толщины, и если для «0,8 мм»
+// выбрали лист 0,7 из счёта, пересчёт должен идти по 0,8. Чего нет в справочнике (стенка, размер листа) — из счёта.
 function mergeSpec(it, cs) {
   var out = {};
-  Object.keys(cs).forEach(function (k) { out[k] = cs[k]; });
-  Object.keys(it).forEach(function (k) { if (it[k] !== '' && it[k] != null && !(k === 'form' && it[k] === 'other')) out[k] = it[k]; });
+  Object.keys(it).forEach(function (k) { if (it[k] !== '' && it[k] != null) out[k] = it[k]; });
+  Object.keys(cs).forEach(function (k) { if (cs[k] !== '' && cs[k] != null && !(k === 'form' && cs[k] === 'other')) out[k] = cs[k]; });
   if (!out.metal) out.metal = 'steel';
   return out;
 }
@@ -452,6 +453,48 @@ function round2(n) { return Math.round(n * 100) / 100; }
 function fmt(n, d) {
   var v = Number(n).toFixed(d == null ? 2 : d).replace(/\.?0+$/, '');
   return v.replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
+// Распознанный PDF часто разносит ячейки таблицы по строкам: «1 Лист …», «183 498», «0,175», «Т», «32 112,15».
+// Позиция — строка «N название» (N идут подряд с 1), её числа — в строках до следующей позиции.
+// Цена, кол-во и сумма — тройка чисел, где цена × кол-во = сумма (±1%); кол-во — рядом с единицей.
+function parseInvoiceBlocks(lines) {
+  var L = (lines || []).map(function (l) { return String(l).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim(); })
+    .filter(Boolean);
+  var starts = [], next = 1;
+  L.forEach(function (l, i) {
+    var m = l.match(/^(\d{1,3})[.)]?\s+(?=.*[А-Яа-яA-Za-z]{3})(.+)$/);
+    if (m && Number(m[1]) === next && !/^\d+[.,]\d/.test(m[2])) { starts.push(i); next++; }
+  });
+  var endRe = /^(итого|всего|ориентировочный|в том числе)/i;
+  var unitRe = new RegExp('^' + UNIT_RE + '\\.?$', 'i');
+  var out = [];
+  starts.forEach(function (st, k) {
+    var stop = k + 1 < starts.length ? starts[k + 1] : L.length;
+    var name = L[st].replace(/^\d{1,3}[.)]?\s+/, ''), nums = [], unit = '', unitAt = -1;
+    for (var i = st + 1; i < stop; i++) {
+      var l = L[i];
+      if (endRe.test(l)) break;
+      if (unitRe.test(l)) { unit = l.replace(/\.$/, ''); unitAt = nums.length; continue; }
+      var n = l.match(/^(\d{1,3}(?:[ ]\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?)(?![\d.,]*\s*[xх×*]\s*\d)(\s+(\S+))?/);
+      if (n && !/[А-Яа-яA-Za-z]{2}/.test(l.replace(/\/.*$/, '').replace(/шт\.?|кг|т\b/gi, ''))) {
+        nums.push(parseNum(n[1]));
+        if (!unit && n[3] && unitRe.test(n[3])) { unit = n[3]; unitAt = nums.length; }
+        continue;
+      }
+      if (!nums.length && (/^\|/.test(l) || /\d\s*[xх×*]\s*\d/.test(l))) name += ' ' + l.replace(/^\|\s*/, '');
+    }
+    var best = null;
+    for (var a = 0; a < nums.length; a++) for (var b = 0; b < nums.length; b++) for (var c = 0; c < nums.length; c++) {
+      if (a === b || a === c || b === c || !(nums[c] > 0)) continue;
+      if (Math.abs(nums[a] * nums[b] - nums[c]) / nums[c] > 0.01) continue;
+      // b — количество: ближе к единице измерения; иначе меньшее из двух
+      var score = (unitAt >= 0 ? -Math.min(Math.abs(b + 1 - unitAt), Math.abs(b - unitAt)) : 0) + (nums[b] <= nums[a] ? 0.5 : 0);
+      if (!best || score > best.score) best = { price: nums[a], qty: nums[b], sum: nums[c], score: score };
+    }
+    if (best) out.push({ name: cleanItemName(name), qty: best.qty, unit: unit || 'шт', price: best.price, sum: best.sum, checked: true });
+  });
+  return out;
 }
 
 // Все строки счёта: строки текста + строки таблиц (ячейки). Услуги и итоги — отдельно.
@@ -470,6 +513,7 @@ function parseInvoice(lines, tableRows) {
   };
   (tableRows || []).forEach(function (cells) { add(parseInvoiceLine(invoiceCellsToLine(cells))); });
   (lines || []).forEach(function (l) { add(parseInvoiceLine(l)); });
+  if (!items.length) parseInvoiceBlocks(lines).forEach(add); // таблица разнесена по строкам
   var f = items.some(function (it) { return it.vat; }) ? 1 : invoiceVatFactor((lines || []).concat((tableRows || []).map(invoiceCellsToLine)), items.concat(skipped));
   if (f !== 1) items.forEach(function (it) { it.price = round2(it.price * f); it.sum = round2(it.sum * f); it.vat = true; });
   return { items: items, skipped: skipped };
@@ -482,7 +526,7 @@ if (typeof module !== 'undefined') {
     priceKey: priceKey, telegramMessageLink: telegramMessageLink, escapeHtml: escapeHtml, formatRub: formatRub,
     parseNum: parseNum, normUnit: normUnit, parseInvoiceLine: parseInvoiceLine, parseInvoiceHeader: parseInvoiceHeader,
     parseItemSpec: parseItemSpec, parseCatalogSpec: parseCatalogSpec, matchMaterial: matchMaterial,
-    massPerMeter: massPerMeter, convertPrice: convertPrice, parseInvoice: parseInvoice,
+    massPerMeter: massPerMeter, convertPrice: convertPrice, parseInvoice: parseInvoice, parseInvoiceBlocks: parseInvoiceBlocks,
     invoiceCellsToLine: invoiceCellsToLine
   };
 }
