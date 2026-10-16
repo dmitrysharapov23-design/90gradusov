@@ -229,33 +229,83 @@ def send_time(created):
 
 # ---------- создание (только с --create) ----------
 
-def create(b24, req):
-    contact = {"NAME": req["name"] or req["tg"] or req["phone"], "SOURCE_ID": "OTHER" if req["source"] == "instagram" else SITE_SOURCE}
+MANAGER_ID = 13          # Екатерина Вульпя — ответственная за входящие
+INSTA_SOURCE = "WEBFORM"  # в Б24 переименован в «Инстаграм»
+
+
+def comment(b24, entity, eid, text):
+    b24.call("crm.timeline.comment.add", {"fields": {"ENTITY_ID": int(eid), "ENTITY_TYPE": entity, "COMMENT": text}})
+
+
+def create(b24, req, draft):
+    src = INSTA_SOURCE if req["source"] == "instagram" else SITE_SOURCE
+    contact = {"NAME": req["name"] or req["tg"] or req["phone"], "SOURCE_ID": src, "ASSIGNED_BY_ID": MANAGER_ID}
     if req["phone"]:
         contact["PHONE"] = [{"VALUE": req["phone"], "VALUE_TYPE": "WORK"}]
+    if req["tg"]:
+        contact["COMMENTS"] = f"Telegram: {req['tg']}"
     cid = b24.call("crm.contact.add", {"fields": contact})
     if req["source"] == "site":
         b24.call("crm.lead.update", {"id": req["lead_id"], "fields": {"CONTACT_ID": cid}})
         lid = req["lead_id"]
     else:
         lead = {"TITLE": f"Instagram: {req['name'] or req['tg'] or req['phone']}", "NAME": req["name"],
-                "SOURCE_ID": "OTHER", "SOURCE_DESCRIPTION": "Instagram (чат «Заявки из Инсты»)",
-                "CONTACT_ID": cid, "COMMENTS": req["raw"]}
+                "SOURCE_ID": INSTA_SOURCE, "SOURCE_DESCRIPTION": "Чат Б24 «Заявки из Инсты»",
+                "ASSIGNED_BY_ID": MANAGER_ID, "CONTACT_ID": cid, "COMMENTS": req["raw"]}
         if req["phone"]:
             lead["PHONE"] = [{"VALUE": req["phone"], "VALUE_TYPE": "WORK"}]
         if req["tg"]:
             lead["UF_CRM_TELEGRAMUSERNAME_WZ"] = req["tg"]
         lid = b24.call("crm.lead.add", {"fields": lead})
+    if draft:
+        comment(b24, "lead", lid, f"Черновик приветствия (автоматически НЕ отправлено — отправить вручную из Wazzup, "
+                                  f"{draft['when']}):\n\n{draft['text']}")
+    elif req.get("chat_bound"):
+        comment(b24, "lead", lid, "Контакт создан автоматически. Переписка в Telegram уже идёт — приветствие не нужно.")
+    else:
+        comment(b24, "lead", lid, f"Клиент просил: {req['channel']}. Приветствие в Telegram не готовилось — связаться вручную.")
     return cid, lid
 
 
+def mark_dup(b24, req, dups):
+    """Дубль: новый лид не создаём, оставляем комментарий в найденной записи (статус не меняем)."""
+    kind, eid = dups[0].split()
+    what = "Instagram" if req["source"] == "instagram" else "с сайта"
+    text = (f"Повторная заявка {what} от {req['date'].replace('T', ' ')}: {req['request'] or '—'}. "
+            f"Контакт: {req['phone'] or ''} {req['tg'] or ''}. Новый лид не создан (правило 60 дней).")
+    if kind in ("lead", "deal", "contact"):
+        comment(b24, kind, eid, text)
+    if req["source"] == "site":
+        comment(b24, "lead", req["lead_id"], f"Возможный дубль: {', '.join(dups)}. Проверьте и при необходимости "
+                                             f"закройте статусом «Дубль / не клиент».")
+    return f"{kind} {eid}"
+
+
 # ---------- main ----------
+
+STATE = ROOT / "data" / "leads" / "inbound_state.json"
+LOG = ROOT / "data" / "leads" / "inbound.log"
+
+
+def log(msg):
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default=(date.today() - timedelta(days=14)).isoformat())
     ap.add_argument("--create", action="store_true")
+    ap.add_argument("--work-hours-only", action="store_true", help="для расписания: выйти вне пн–пт 10–19")
     args = ap.parse_args()
+
+    now = datetime.now()
+    if args.work_hours_only and not (now.weekday() < 5 and WORK_START <= now.hour < WORK_END):
+        return 0
+
+    state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"start": args.since, "done": {}}
+    if args.create:
+        args.since = state["start"]   # боевой режим: только заявки с даты запуска
 
     env = load_env()
     b24 = B24(env["B24_LEADS_WEBHOOK"])
@@ -268,7 +318,11 @@ def main():
                                                  "UF_CRM_MESSENGERID", "UF_CRM_RASSKAZHITECH", "UF_CRM_PRODUCT",
                                                  "UF_CRM_TELEGRAMID_WZ", "UF_CRM_TELEGRAMUSERNAME_WZ", "CONTACT_ID"]}) or []
     reqs += [from_site(l) for l in site if not l.get("CONTACT_ID")]
+    if args.create:
+        reqs = [r for r in reqs if r["src_id"] not in state["done"]]
     reqs.sort(key=lambda r: r["date"])
+    if args.create and not reqs:
+        return 0
 
     out = [f"# Входящие заявки с {args.since} — {'СОЗДАНИЕ' if args.create else 'вхолостую (ничего не создано и не отправлено)'}\n"]
     stats = {"всего": len(reqs), "дубль": 0, "к созданию": 0, "без приветствия": 0}
@@ -295,14 +349,29 @@ def main():
             out.append(f"- Приветствие не отправляется (канал {r['channel']}) → задача Екатерине\n")
         else:
             out.append("")
-        if args.create and not dups:
-            cid, lid = create(b24, r)
-            out.append(f"- Создано: контакт {cid}, лид {lid}\n")
+        if args.create:
+            try:
+                if dups:
+                    where = mark_dup(b24, r, dups)
+                    res = {"result": "дубль", "where": where}
+                else:
+                    draft = {"text": greeting(r), "when": send_time(r["date"])} if can_greet else None
+                    cid, lid = create(b24, r, draft)
+                    res = {"result": "создано", "contact": cid, "lead": lid}
+                out.append(f"- Б24: {res}\n")
+                log(f"{r['src_id']} {res}")
+            except Exception as e:  # не отмечаем как обработанное — повторим в следующий запуск
+                log(f"{r['src_id']} ОШИБКА {e}")
+                out.append(f"- ОШИБКА: {e}\n")
+                continue
+            state["done"][r["src_id"]] = {**res, "at": f"{now:%Y-%m-%d %H:%M}"}
+            STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
     out.insert(1, "Итог: " + ", ".join(f"{k} {v}" for k, v in stats.items()) + "\n")
 
     report = "\n".join(out)
     path = ROOT / "data" / "leads" / f"inbound_{'create' if args.create else 'dry'}_{date.today().isoformat()}.md"
-    path.write_text(report, encoding="utf-8")
+    with path.open("a" if args.create else "w", encoding="utf-8") as f:
+        f.write(report + "\n")
     print(report)
     print(f"\nОтчёт: {path.relative_to(ROOT)}")
 
