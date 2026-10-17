@@ -1,0 +1,13 @@
+# Бывший launchd ru.90gradusov.check-client-agent (StartInterval 300).
+[Unit]
+Description=90gradusov: сторож агента клиентов
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov
+ExecStart=/bin/bash /home/gradus/90gradusov/scripts/check_client_agent.sh
+StandardOutput=append:/home/gradus/90gradusov/data/client_agent/watchdog.log
+StandardError=append:/home/gradus/90gradusov/data/client_agent/watchdog.log

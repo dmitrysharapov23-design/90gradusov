@@ -1,0 +1,10 @@
+[Unit]
+Description=90gradusov: входящие заявки → лиды Б24 — каждые 10min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+# Бывший launchd ru.90gradusov.check-inbound-leads (StartInterval 300).
+[Unit]
+Description=90gradusov: сторож входящих заявок
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov
+ExecStart=/bin/bash /home/gradus/90gradusov/scripts/check_inbound_leads.sh
+StandardOutput=append:/home/gradus/90gradusov/data/leads/watchdog.log
+StandardError=append:/home/gradus/90gradusov/data/leads/watchdog.log

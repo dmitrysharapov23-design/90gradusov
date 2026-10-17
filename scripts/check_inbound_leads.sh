@@ -42,11 +42,16 @@ if [ -f "$STAMP" ] && find "$STAMP" -mmin -60 | grep -q .; then
   exit 0
 fi
 
+if command -v systemctl >/dev/null; then   # сервер (deploy/)
+  WHERE="сервер $(hostname)"; RESTART="sudo systemctl start 90g-inbound-leads.service; статус — systemctl status 90g-inbound-leads.timer"
+else
+  WHERE="Mac включён и не спит"; RESTART="launchctl kickstart -k gui/\$(id -u)/ru.90gradusov.inbound-leads"
+fi
 MSG="$DIR/watchdog_msg.txt"
 cat > "$MSG" <<TXT
 ⚠️ Автозаявки (Instagram/сайт → лиды): $PROBLEMS.
-Проверьте: Mac включён и не спит; журнал — data/leads/inbound.log и inbound_launchd.log.
-Перезапуск: launchctl kickstart -k gui/\$(id -u)/ru.90gradusov.inbound-leads
+Проверьте: $WHERE; журнал — data/leads/inbound.log и inbound_launchd.log.
+Перезапуск: $RESTART
 TXT
 
 if [ "${WATCHDOG_DRY_RUN:-0}" = "1" ]; then

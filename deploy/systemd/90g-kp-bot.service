@@ -1,0 +1,18 @@
+# Telegram-бот КП (бывший launchd ru.90gradusov.kp-bot): работает постоянно, при падении — перезапуск через 30 с.
+[Unit]
+Description=90gradusov: Telegram-бот КП
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov
+Environment=PYTHONWARNINGS=ignore
+ExecStart=/home/gradus/90gradusov/.venv/bin/python /home/gradus/90gradusov/app/kp/bot.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/gradus/90gradusov/data/kp/bot/launchd.log
+StandardError=append:/home/gradus/90gradusov/data/kp/bot/launchd.log
+
+[Install]
+WantedBy=multi-user.target

@@ -31,11 +31,16 @@ if [ -f "$STAMP" ] && find "$STAMP" -mmin -60 | grep -q .; then
   exit 0
 fi
 
+if command -v systemctl >/dev/null; then   # сервер (deploy/)
+  WHERE="сервер $(hostname)"; RESTART="sudo systemctl start 90g-client-agent.service; статус — systemctl status 90g-client-agent.timer"
+else
+  WHERE="Mac включён и не спит"; RESTART="launchctl kickstart -k gui/\$(id -u)/ru.90gradusov.client-agent"
+fi
 MSG="$DIR/watchdog_msg.txt"
 cat > "$MSG" <<TXT
 ⚠️ Агент клиентов $WHAT.
-Проверьте: Mac включён и не спит; лог — data/client_agent/launchd.log и agent.log.
-Перезапуск: launchctl kickstart -k gui/\$(id -u)/ru.90gradusov.client-agent
+Проверьте: $WHERE; лог — data/client_agent/launchd.log и agent.log.
+Перезапуск: $RESTART
 TXT
 
 if [ "${WATCHDOG_DRY_RUN:-0}" = "1" ]; then

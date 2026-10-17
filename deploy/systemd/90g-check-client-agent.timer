@@ -1,0 +1,10 @@
+[Unit]
+Description=90gradusov: сторож агента клиентов — каждые 5min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

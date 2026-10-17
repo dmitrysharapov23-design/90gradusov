@@ -1,0 +1,13 @@
+# Бывший launchd ru.90gradusov.client-agent (StartInterval 120).
+[Unit]
+Description=90gradusov: агент клиентов (теневой режим)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov
+ExecStart=/home/gradus/90gradusov/.venv/bin/python /home/gradus/90gradusov/app/client_agent/agent.py
+StandardOutput=append:/home/gradus/90gradusov/data/client_agent/launchd.log
+StandardError=append:/home/gradus/90gradusov/data/client_agent/launchd.log

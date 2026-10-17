@@ -1,0 +1,10 @@
+[Unit]
+Description=90gradusov: агент клиентов (теневой режим) — каждые 2min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

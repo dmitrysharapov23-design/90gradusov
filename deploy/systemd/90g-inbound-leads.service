@@ -1,0 +1,13 @@
+# Бывший launchd ru.90gradusov.inbound-leads (StartInterval 600).
+[Unit]
+Description=90gradusov: входящие заявки → лиды Б24
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov
+ExecStart=/usr/bin/python3 /home/gradus/90gradusov/scripts/inbound_leads.py --create --work-hours-only
+StandardOutput=append:/home/gradus/90gradusov/data/leads/inbound_launchd.log
+StandardError=append:/home/gradus/90gradusov/data/leads/inbound_launchd.log
