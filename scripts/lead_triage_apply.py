@@ -10,6 +10,8 @@
 import argparse
 import csv
 import sys
+import time
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -27,14 +29,16 @@ def main():
     ap.add_argument("csv")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--all-yes", action="store_true")
+    ap.add_argument("--skip", default="", help="ID лидов через запятую, которые не трогать")
     args = ap.parse_args()
+    skip = {x.strip() for x in args.skip.split(",") if x.strip()}
     plan = []
     with open(args.csv, encoding="utf-8-sig") as f:
         for r in csv.DictReader(f, delimiter=";"):
             ok = (r.get("Утвердить (да/нет/код)") or "").strip()
             if not ok and args.all_yes:
                 ok = "да"
-            if not ok or ok.lower() in ("нет", "no", "-"):
+            if not ok or ok.lower() in ("нет", "no", "-") or r["Лид"] in skip:
                 continue
             code = r["Код"] if ok.lower() in ("да", "yes", "+") else ok
             if code not in STATUSES:
@@ -42,6 +46,20 @@ def main():
                 continue
             plan.append((r["Лид"], r["Название"], r["Сейчас"], code))
     d = env_b24(load_env())
+    raw_call = d.b24.call
+
+    def call(method, params):
+        """Повтор при сетевых сбоях (таймаут TLS у портала Б24)."""
+        for attempt in range(5):
+            try:
+                time.sleep(0.3)
+                return raw_call(method, params)
+            except OSError as e:  # URLError, socket.timeout, ConnectionError
+                if attempt == 4:
+                    raise
+                print(f"  сеть: {e}; повтор через {5 * (attempt + 1)} с")
+                time.sleep(5 * (attempt + 1))
+    d.b24.call = call
     changed = 0
     for lid, title, now_name, code in plan:
         cur = d.b24.call("crm.lead.get", {"id": lid})["result"]["STATUS_ID"]
