@@ -86,6 +86,8 @@
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_list",
       "mcp__feee96f9-a0c8-4874-84e7-e0305333a5e9__smart_get",
       "Bash(python3 scripts/chat_response_times.py:*)",
+      "Bash(python3 scripts/workdays_since.py:*)",
+      "Bash(date +*)",
       "Bash(scripts/tg_send.sh data/chats/*)",
       "Write(data/chats/**)",
       "Edit(data/chats/**)"
