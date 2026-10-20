@@ -10,7 +10,7 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)/systemd"
 APP=/home/gradus/90gradusov
-UNITS="90g-kp-bot.service 90g-client-agent.timer 90g-inbound-leads.timer 90g-check-client-agent.timer 90g-check-inbound-leads.timer"
+UNITS="90g-kp-bot.service 90g-reports-bot.service 90g-client-agent.timer 90g-inbound-leads.timer 90g-check-client-agent.timer 90g-check-inbound-leads.timer"
 
 if [ "${1:-}" = "--stop" ]; then
   systemctl disable --now $UNITS

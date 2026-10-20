@@ -24,7 +24,7 @@ git config user.email >/dev/null || git config user.email "vps@90gradusov.local"
 .venv/bin/pip install -q -r app/kp/requirements.txt -r app/client_agent/requirements.txt
 
 # папки под рабочие файлы ботов (data/ не в git; закрыта от других пользователей)
-mkdir -p data/kp/bot data/kp/out data/kp/template data/client_agent data/leads data/chats
+mkdir -p data/kp/bot data/kp/out data/kp/template data/client_agent data/leads data/chats data/reports
 chmod 700 data
 [ -f .env ] && chmod 600 .env
 

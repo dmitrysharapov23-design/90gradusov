@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # задачи, которые переезжают; сторож сводки (check-summary) остаётся на Mac — сводку делает задача Claude здесь
-LABELS="ru.90gradusov.kp-bot ru.90gradusov.client-agent ru.90gradusov.inbound-leads ru.90gradusov.check-client-agent ru.90gradusov.check-inbound-leads"
+LABELS="ru.90gradusov.kp-bot ru.90gradusov.reports-bot ru.90gradusov.client-agent ru.90gradusov.inbound-leads ru.90gradusov.check-client-agent ru.90gradusov.check-inbound-leads"
 DOMAIN="gui/$(id -u)"
 APP=/home/gradus/90gradusov
 
@@ -48,7 +48,7 @@ if [ "$MODE" = "--switch" ]; then
     echo "Какая-то задача ещё работает на Mac — состояние не переношу"; exit 1
   fi
   echo "== Состояние задач (что уже обработано — чтобы не было дублей лидов и повторных сообщений)"
-  send data/leads/inbound_state.json data/client_agent/state.json data/client_agent/external_sent.json data/kp/bot/state.json
+  send data/leads/inbound_state.json data/client_agent/state.json data/client_agent/external_sent.json data/kp/bot/state.json data/reports/bot_state.json
   echo
   echo "Mac остановлен. Теперь на сервере от root:  bash $APP/deploy/install_services.sh --start"
   echo "Если что-то не так — на сервере  install_services.sh --stop, на Mac  deploy/push_to_server.sh --back"

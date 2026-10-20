@@ -1,0 +1,18 @@
+# Бот сводки: отчёты по запросу владельца (бывший launchd ru.90gradusov.reports-bot). Работает постоянно, при падении — перезапуск через 30 с.
+[Unit]
+Description=90gradusov: бот отчётов (сводка)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov/app/reports
+Environment=PYTHONWARNINGS=ignore
+ExecStart=/home/gradus/90gradusov/.venv/bin/python /home/gradus/90gradusov/app/reports/bot.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/gradus/90gradusov/data/reports/launchd.log
+StandardError=append:/home/gradus/90gradusov/data/reports/launchd.log
+
+[Install]
+WantedBy=multi-user.target
