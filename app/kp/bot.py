@@ -8,6 +8,7 @@ ANTHROPIC_API_KEY, B24_AGENT_WEBHOOK (необязательно — назва�
 
     .venv/bin/python app/kp/bot.py
 """
+import base64
 import json
 import re
 import shutil
@@ -39,6 +40,7 @@ STATE = DATA / "state.json"
 QUIET_SEC = 4          # ждём хвост альбома после последнего сообщения
 BUFFER_MIN = 30        # картинки без задания живут столько минут
 MAX_JOBS = 300         # сколько последних КП помнить для правок
+NET_TRIES, NET_PAUSE = 3, 5  # повторы при сбое сети: попыток, пауза (с, растёт)
 TRIGGER = re.compile(r"#\d+|\bкп\b", re.IGNORECASE)
 
 HELP = """Пришлите задание на КП одним сообщением (или подписью к альбому):
@@ -70,13 +72,22 @@ class TG:
         self.file_base = f"https://api.telegram.org/file/bot{token}/"
 
     def call(self, method, params=None, timeout=40):
+        """Запрос к Telegram. Сетевые сбои (не ответы Telegram) повторяются до 3 раз, кроме getUpdates."""
         data = json.dumps(params or {}).encode()
-        req = urllib.request.Request(self.base + method, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                res = json.load(r)
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"Telegram {method}: HTTP {e.code} {e.read().decode(errors='ignore')[:200]}")
+        tries = 1 if method == "getUpdates" else NET_TRIES
+        for attempt in range(tries):
+            req = urllib.request.Request(self.base + method, data=data, headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    res = json.load(r)
+                break
+            except urllib.error.HTTPError as e:
+                raise RuntimeError(f"Telegram {method}: HTTP {e.code} {e.read().decode(errors='ignore')[:200]}")
+            except (urllib.error.URLError, OSError) as e:
+                if attempt == tries - 1:
+                    raise
+                log(f"Telegram {method}: сбой сети ({e}), повтор")
+                time.sleep(NET_PAUSE * (attempt + 1))
         if method != "getUpdates":
             log(f"Telegram {method}: ok")
         if not res.get("ok"):
@@ -92,7 +103,7 @@ class TG:
     def send_file(self, chat, path, caption="", reply_to=None):
         """Файл через curl (свой multipart на urllib Telegram отвергал с 413). Токен — через stdin, не в argv."""
         cfg = f'url = "{self.base}sendDocument"\n'
-        args = ["curl", "-sS", "--max-time", "180", "-K", "-", "-F", f"chat_id={chat}", "-F", f"document=@{path}"]
+        args = ["curl", "-sS", "--max-time", "180", "--retry", str(NET_TRIES), "--retry-all-errors", "-K", "-", "-F", f"chat_id={chat}", "-F", f"document=@{path}"]
         if caption:
             args += ["-F", f"caption={caption[:1000]}"]
         if reply_to:
@@ -185,11 +196,11 @@ def attachments(tg, msg):
 
 
 def deal_title(env, deal_id):
-    if not deal_id or not env.get("B24_AGENT_WEBHOOK"):
+    api = b24(env)
+    if not deal_id or not api:
         return None
     try:
-        from b24 import B24
-        return B24(env["B24_AGENT_WEBHOOK"]).call("crm.deal.get", {"id": deal_id})["result"].get("TITLE")
+        return retry(lambda: api.call("crm.deal.get", {"id": deal_id}), "Б24: сделка")["result"].get("TITLE")
     except Exception as e:
         log(f"Б24: сделка {deal_id} не прочитана ({e})")
         return None
@@ -224,6 +235,52 @@ def render_pdf(pptx):
             f.unlink(missing_ok=True)
 
 
+def retry(fn, what):
+    """Повтор при сбое сети/сервиса (Drive): NET_TRIES попыток с растущей паузой."""
+    for attempt in range(NET_TRIES):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == NET_TRIES - 1 or str(e).startswith("Б24 "):  # ответ Б24 (нет сделки, нет прав) не повторяем
+                raise
+            log(f"{what}: сбой ({type(e).__name__}: {e}), повтор")
+            time.sleep(NET_PAUSE * (attempt + 1))
+
+
+def b24(env):
+    from b24 import B24
+    hook = env.get("KP_B24_WEBHOOK") or env.get("B24_AGENT_WEBHOOK")
+    return B24(hook) if hook else None
+
+
+def deal_comment(env, deal_id, title, path, link, pdf, items_total, log_sum, term, sender):
+    """Комментарий в сделку Б24: ссылка на КП и PDF (решение 15.10.2026: чтение сделки и комментарий с КП).
+    Единственная запись бота в Б24. -> строка для сводки или None."""
+    if not deal_id or env.get("KP_B24_COMMENT", "1") != "1":
+        return None
+    api = b24(env)
+    if not api:
+        return "Б24: вебхук не настроен, комментарий в сделку не добавлен."
+    if not title:  # deal_title вернул None — сделки нет или Б24 недоступен
+        return f"Б24: сделка #{deal_id} не найдена, комментарий не добавлен. Проверьте номер."
+    lines = [f"КП: {path.stem}"]
+    if link:
+        lines.append(f"Google Презентация: {link}")
+    lines.append(f"Изделия: {make_kp.money(items_total)}" + (f"; доставка/монтаж: {make_kp.money(log_sum)}" if log_sum else "")
+                 + f"; срок {term} раб. дн.")
+    lines.append(f"Собрано ботом КП по сообщению @{sender}." if sender else "Собрано ботом КП.")
+    fields = {"ENTITY_ID": int(deal_id), "ENTITY_TYPE": "deal", "COMMENT": "\n".join(lines).replace("\u00a0", " ")}
+    if pdf:
+        fields["FILES"] = [[pdf.name, base64.b64encode(pdf.read_bytes()).decode()]]
+    try:
+        retry(lambda: api.call("crm.timeline.comment.add", {"fields": fields}), "Б24: комментарий")
+        log(f"Б24: комментарий в сделку {deal_id} ({path.stem})")
+        return f"Б24: ссылка и PDF добавлены комментарием в сделку #{deal_id}."
+    except Exception as e:
+        log(f"Б24: комментарий в сделку {deal_id} не добавлен ({type(e).__name__}: {e})")
+        return f"Б24: не удалось добавить комментарий в сделку #{deal_id} ({e})."
+
+
 def summary(kp, path, items_total, log_sum, warns, link=None):
     lines = [f"Готово: {path.stem}"] + ([f"Открыть и править: {link}"] if link else []) + [""]
     for it in kp.items:
@@ -240,7 +297,7 @@ def summary(kp, path, items_total, log_sum, warns, link=None):
     return "\n".join(lines).replace(" ", " ")
 
 
-def run_job(tg, client, env, chat, reply_to, text, images, previous=None):
+def run_job(tg, client, env, chat, reply_to, text, images, previous=None, sender=""):
     """Разобрать задание (или правку), собрать КП, ответить. -> (id сообщения с результатом, KP, название сделки)."""
     tg.send(chat, "Собираю КП, это около минуты…", reply_to)
     prev = parse.KP.model_validate(previous["kp"]) if previous else None
@@ -257,21 +314,22 @@ def run_job(tg, client, env, chat, reply_to, text, images, previous=None):
     except make_kp.KPError as e:
         m = tg.send(chat, f"КП не собрано: {e}\nОтветьте на это сообщение исправлением.", reply_to)
         return m["message_id"], kp, title
-    link = None
+    link = pdf = None
     if gdrive.ready():
         try:
-            fid, link = gdrive.upload(path)
-            pdf = gdrive.export_pdf(fid, path.with_suffix(".pdf"))
+            fid, link = retry(lambda: gdrive.upload(path), "Drive: загрузка")
+            pdf = retry(lambda: gdrive.export_pdf(fid, path.with_suffix(".pdf")), "Drive: PDF")
             tg.send_file(chat, pdf, f"{path.stem}\nGoogle Презентация: {link}", reply_to)
         except Exception as e:
             log(f"Drive: не загружено ({type(e).__name__}: {e})")
-            link = None
+            link = pdf = None
     if not link:  # без Drive — исходный .pptx (+ PDF через PowerPoint, если включён)
         pdf = render_pdf(path) if env.get("KP_RENDER_PDF", "0") == "1" else None
         if pdf:
             tg.send_file(chat, pdf, "Для просмотра", reply_to)
         tg.send_file(chat, path, "", reply_to)
-    m = tg.send(chat, summary(kp, path, items_total, log_sum, warns, link), reply_to)
+    b24_note = deal_comment(env, kp.deal_id, title, path, link, pdf, items_total, log_sum, kp.production_term, sender)
+    m = tg.send(chat, summary(kp, path, items_total, log_sum, warns, link) + (f"\n\n{b24_note}" if b24_note else ""), reply_to)
     log(f"чат {chat}: {path.name}, позиций {len(kp.items)}, итого {items_total}, ссылка {'есть' if link else 'нет'}")
     return m["message_id"], kp, title
 
@@ -284,14 +342,24 @@ def main():
     st = load_state()
     pending = {}  # chat -> {"text", "reply_to", "images", "last"}
     buffer = {}   # chat -> [(time, path)] картинки до задания
+    captions = {}  # chat -> [подписи к картинкам без «КП»] — войдут в задание
+    acks = {}     # chat -> {"last", "reply_to"} — ответить «картинки получил», когда альбом дойдёт целиком
+    outage = None  # {"since", "count"} — пока нет связи с Telegram
     log("бот запущен")
     while True:
         try:
-            ups = tg.call("getUpdates", {"offset": st["offset"], "timeout": 2 if pending else 25}, timeout=40)
+            ups = tg.call("getUpdates", {"offset": st["offset"], "timeout": 2 if pending or acks else 25}, timeout=40)
         except Exception as e:
-            log(f"getUpdates: {e}")
+            if outage is None:
+                outage = {"since": time.time(), "count": 0}
+                log(f"нет связи с Telegram: {e}")
+            outage["count"] += 1
             time.sleep(10)
             continue
+        if outage:
+            log(f"связь с Telegram восстановлена: {outage['count']} неудачных запросов за "
+                f"{(time.time() - outage['since']) / 60:.0f} мин")
+            outage = None
         for u in ups:
             st["offset"] = u["update_id"] + 1
             msg = u.get("message")
@@ -312,6 +380,8 @@ def main():
                 continue
             if text == "/new":
                 buffer.pop(chat, None)
+                captions.pop(chat, None)
+                acks.pop(chat, None)
                 pending.pop(chat, None)
                 tg.send(chat, "Картинки сброшены.")
                 continue
@@ -329,13 +399,20 @@ def main():
                 p["last"] = time.time()
             elif job and text:  # правка готового КП
                 pending[chat] = {"text": text, "reply_to": msg["message_id"], "images": job["images"] + [str(f) for f in files],
-                                 "last": time.time(), "group": msg.get("media_group_id"), "previous": job}
+                                 "last": time.time(), "group": msg.get("media_group_id"), "previous": job,
+                                 "sender": user.get("username") or ""}
             elif text and TRIGGER.search(text):
                 old = [str(f) for t, f in buffer.pop(chat, []) if time.time() - t < BUFFER_MIN * 60]
+                caps = captions.pop(chat, [])
+                text = "\n".join((caps if old else []) + [text])  # подписи — только если их картинки ещё не устарели
+                acks.pop(chat, None)
                 pending[chat] = {"text": text, "reply_to": msg["message_id"], "images": old + [str(f) for f in files],
-                                 "last": time.time(), "group": msg.get("media_group_id")}
+                                 "last": time.time(), "group": msg.get("media_group_id"), "sender": user.get("username") or ""}
             elif files:
                 buffer.setdefault(chat, []).extend((time.time(), f) for f in files)
+                if text:
+                    captions.setdefault(chat, []).append(text)
+                acks[chat] = {"last": time.time(), "reply_to": acks.get(chat, {}).get("reply_to") or msg["message_id"]}
             elif not text:
                 kind = next((k for k in ("voice", "audio", "video", "video_note", "sticker", "animation", "location", "contact")
                              if msg.get(k)), "другое")
@@ -347,13 +424,22 @@ def main():
                         msg["message_id"])
         save_state(st)
 
+        for chat, a in list(acks.items()):  # альбом без «КП» дошёл — сказать, что ждём задание
+            if time.time() - a["last"] < QUIET_SEC:
+                continue
+            acks.pop(chat)
+            n = sum(1 for t, _ in buffer.get(chat, []) if time.time() - t < BUFFER_MIN * 60)
+            note = " Подпись к ним тоже учту." if captions.get(chat) else ""
+            tg.send(chat, f"Картинки получил ({n}).{note} Теперь пришлите задание с «#номером сделки» или словом «КП» - "
+                          f"соберу КП с этими картинками. Картинки ждут {BUFFER_MIN} мин, /new - сбросить.", a["reply_to"])
+
         for chat, p in list(pending.items()):
             if time.time() - p["last"] < QUIET_SEC:
                 continue
             pending.pop(chat)
             try:
                 images = [Path(x) for x in p["images"]]
-                mid, kp, title = run_job(tg, client, env, chat, p["reply_to"], p["text"], images, p.get("previous"))
+                mid, kp, title = run_job(tg, client, env, chat, p["reply_to"], p["text"], images, p.get("previous"), p.get("sender", ""))
                 st["jobs"][f"{chat}:{mid}"] = {"kp": kp.model_dump(), "images": p["images"], "client": title,
                                                "at": datetime.now().isoformat(timespec="seconds")}
                 st["jobs"] = dict(list(st["jobs"].items())[-MAX_JOBS:])

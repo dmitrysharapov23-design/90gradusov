@@ -36,7 +36,7 @@ osascript -e 'tell application "Microsoft PowerPoint"' -e 'open POSIX file "/п�
 ```
 
 ## Бот
-Ключи в `.env` (кладёт владелец, в чат не присылать): `KP_TG_BOT_TOKEN`, `KP_TG_ALLOWED_IDS` (числовые ID или ники через запятую), `ANTHROPIC_API_KEY`; необязательно `B24_AGENT_WEBHOOK` (название сделки), `KP_RENDER_PDF=1` (PDF через PowerPoint, если нет Drive). Google: `data/kp/google_oauth_client.json` + `.venv/bin/python app/kp/gdrive.py login`.
+Ключи в `.env` (кладёт владелец, в чат не присылать): `KP_TG_BOT_TOKEN`, `KP_TG_ALLOWED_IDS` (числовые ID или ники через запятую), `ANTHROPIC_API_KEY`; необязательно `B24_AGENT_WEBHOOK` (название сделки), `KP_RENDER_PDF=1` (PDF через PowerPoint, если нет Drive), `KP_B24_WEBHOOK` (иначе берётся `B24_AGENT_WEBHOOK`), `KP_B24_COMMENT=0` (не писать комментарий в сделку). Google: `data/kp/google_oauth_client.json` + `.venv/bin/python app/kp/gdrive.py login`.
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/ru.90gradusov.kp-bot
