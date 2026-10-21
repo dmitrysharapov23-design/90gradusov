@@ -195,8 +195,10 @@ class InboundSend(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--send работает только вместе с --create", r.stderr)
         plist = (ROOT / "scripts" / "launchd" / "ru.90gradusov.inbound-leads.plist")
-        if plist.exists():
-            self.assertNotIn("--send", plist.read_text(encoding="utf-8"))
+        if plist.exists():  # отправка в расписании — только с датой окончания (тест 21–23.10.2026)
+            text = plist.read_text(encoding="utf-8")
+            if "--send" in text.replace("--send-until", ""):
+                self.assertIn("--send-until", text)
 
     def test_send_error_leaves_draft(self):
         b24 = FakeB24()

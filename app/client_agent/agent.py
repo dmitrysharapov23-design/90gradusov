@@ -159,18 +159,30 @@ class Live:
         self.source.add_comment(lead["ID"], f"ТЗ (собрал ассистент). Причина передачи: {reason}\n\n{tz}")
         cfg = json.loads(NOTIFY_CFG.read_text(encoding="utf-8")) if NOTIFY_CFG.exists() else {}
         katya = str(cfg.get("katya_chat_id") or "")
+        sent_via = ""
         if katya:
-            tg_message(self.env, katya, text)
-            tg_message(self.env, self.env["TG_CHAT_ID"], "Копия (тест ассистента):\n\n" + text)
+            # решение владельца 21.10: Екатерине — в чат бота КП; если она его ещё не запускала (Telegram не даёт
+            # боту писать первым) — через бот сводки, где она уже нажала «Старт»
+            for token_key in ("KP_TG_BOT_TOKEN", "TG_BOT_TOKEN"):
+                if not self.env.get(token_key):
+                    continue
+                try:
+                    tg_message(self.env, katya, text, token_key)
+                    sent_via = "бот КП" if token_key == "KP_TG_BOT_TOKEN" else "бот сводки"
+                    break
+                except Exception as e:
+                    log(f"лид {lead['ID']}: Екатерине через {token_key} не ушло ({e})")
+        if sent_via:
+            tg_message(self.env, self.env["TG_CHAT_ID"], f"Копия (тест ассистента, Екатерине ушло через {sent_via}):\n\n" + text)
         else:
-            tg_message(self.env, self.env["TG_CHAT_ID"], "⚠️ Чат Екатерины с ботом не настроен — перешлите ей:\n\n" + text)
+            tg_message(self.env, self.env["TG_CHAT_ID"], "⚠️ Екатерине не ушло — перешлите ей:\n\n" + text)
 
 
-def tg_message(env, chat_id, text):
+def tg_message(env, chat_id, text, token_key="TG_BOT_TOKEN"):
     import urllib.parse
     import urllib.request
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": text[:4000]}).encode()
-    urllib.request.urlopen(f"https://api.telegram.org/bot{env['TG_BOT_TOKEN']}/sendMessage", data=data, timeout=30)
+    urllib.request.urlopen(f"https://api.telegram.org/bot{env[token_key]}/sendMessage", data=data, timeout=30)
 
 
 def fake_decide(transcript, context):
