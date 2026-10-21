@@ -335,7 +335,8 @@ def wazzup_channel(env):
     if env.get("WAZZUP_CHANNEL_ID"):
         return env["WAZZUP_CHANNEL_ID"]
     # ДОПУЩЕНИЕ: в ответе /v3/channels поля transport и plainId (номер канала) — по документации Wazzup
-    chans = [c for c in wazzup(env, "channels") or [] if c.get("transport") == "telegram"]
+    # проверено 21.10: у рабочего канала transport = "tgapi" (Telegram через личный аккаунт)
+    chans = [c for c in wazzup(env, "channels") or [] if c.get("transport") in ("telegram", "tgapi")]
     pick = [c for c in chans if WORK_TG in re.sub(r"\D", "", str(c.get("plainId", "")))] or chans
     if len(pick) != 1:
         raise RuntimeError(f"Wazzup: каналов Telegram подходит {len(pick)}, нужен один — задайте WAZZUP_CHANNEL_ID")
