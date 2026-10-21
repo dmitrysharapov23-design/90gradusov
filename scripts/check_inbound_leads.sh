@@ -21,9 +21,9 @@ MIN_OF_DAY=$(( 10#$HOUR * 60 + 10#$(TZ=Europe/Moscow date +%M) ))
 PROBLEMS=""
 if [ "$MIN_OF_DAY" -ge 630 ]; then
   if [ -f "$HB" ]; then
-    AGE_MIN="$(/usr/bin/python3 -c 'import sys,datetime as d
-t=d.datetime.fromisoformat(open(sys.argv[1]).read().strip())
-print(int((d.datetime.now(d.timezone.utc)-t).total_seconds()//60))' "$HB")"
+    # без Python: 19.10 системный python3 перестал запускаться (лицензия Xcode) и сторож молчал
+    MTIME=$(stat -f %m "$HB" 2>/dev/null || stat -c %Y "$HB")
+    AGE_MIN=$(( ( $(date +%s) - MTIME ) / 60 ))
     [ "$AGE_MIN" -gt "$MAX_AGE_MIN" ] && PROBLEMS="не работал $AGE_MIN мин (последний проход: $(cut -c1-16 "$HB"))"
   else
     PROBLEMS="ни разу не отметился (нет файла heartbeat)"
