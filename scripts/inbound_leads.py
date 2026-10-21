@@ -392,10 +392,13 @@ def main():
     ap.add_argument("--create", action="store_true")
     ap.add_argument("--send", action="store_true",
                     help="отправлять приветствие через Wazzup (по умолчанию выкл.; включает владелец)")
+    ap.add_argument("--send-until", help="отправлять только до этого момента (ISO), потом — черновик, как без --send")
     ap.add_argument("--work-hours-only", action="store_true", help="для расписания: выйти вне пн–пт 10–19")
     args = ap.parse_args()
     if args.send and not args.create:
         ap.error("--send работает только вместе с --create")
+    if args.send and args.send_until and datetime.now().astimezone() >= datetime.fromisoformat(args.send_until):
+        args.send = False  # тест ассистента 21–23.10.2026 закончился
 
     now = datetime.now()
     if args.work_hours_only and not (now.weekday() < 5 and WORK_START <= now.hour < WORK_END):

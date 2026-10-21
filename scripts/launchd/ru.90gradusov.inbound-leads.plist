@@ -2,19 +2,30 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>ru.90gradusov.inbound-leads</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>/Users/dmitrysharapov/Projects/90gradusov/scripts/inbound_leads.py</string>
-    <string>--create</string>
-    <string>--work-hours-only</string>
-  </array>
-  <key>WorkingDirectory</key><string>/Users/dmitrysharapov/Projects/90gradusov</string>
-  <key>StartInterval</key><integer>600</integer>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
-  <key>StandardOutPath</key><string>/Users/dmitrysharapov/Projects/90gradusov/data/leads/inbound_launchd.log</string>
-  <key>StandardErrorPath</key><string>/Users/dmitrysharapov/Projects/90gradusov/data/leads/inbound_launchd.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>ru.90gradusov.inbound-leads</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/dmitrysharapov/Projects/90gradusov/scripts/inbound_leads.py</string>
+		<string>--create</string>
+		<string>--work-hours-only</string>
+		<string>--send</string>
+		<string>--send-until</string>
+		<string>2026-10-23T19:00:00+03:00</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/dmitrysharapov/Projects/90gradusov/data/leads/inbound_launchd.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/dmitrysharapov/Projects/90gradusov/data/leads/inbound_launchd.log</string>
+	<key>StartInterval</key>
+	<integer>600</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/dmitrysharapov/Projects/90gradusov</string>
 </dict>
 </plist>

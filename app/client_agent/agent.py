@@ -35,6 +35,10 @@ LEAD_FIELDS = ["ID", "TITLE", "NAME", "STATUS_ID", "SOURCE_ID", "DATE_CREATE", "
 # {ID лида: [{"time", "text", "phone", "username", "chat_id", ...}]}. Эти тексты агент считает своими.
 REGISTRY = ROOT / "data" / "client_agent" / "external_sent.json"
 OUR_SOURCES = ("WEBFORM", "WEB")  # «Инстаграм» и «Веб-сайт» — лиды скрипта заявок
+# Боевой режим (тест с 21.10.2026 до 23.10.2026 19:00, решение владельца): ТОЛЬКО для лидов, которым приветствие
+# отправил скрипт заявок (реестр). Агент сам отвечает клиенту через Wazzup; при передаче — комментарий «ТЗ»
+# в лид и сообщение Екатерине в Telegram. Лиды Wazzup — по-прежнему «тень». Включается --live-until.
+NOTIFY_CFG = ROOT / "data" / "client_agent" / "notify.json"  # {"katya_chat_id": "..."} — не секрет, не в git
 
 
 def load_env():
@@ -66,15 +70,20 @@ class LiveSource:
             sys.exit("Нет B24_AGENT_WEBHOOK в .env")
         self.b24 = B24(env["B24_AGENT_WEBHOOK"])
 
-    def leads(self, now):
-        leads = self.b24.list("crm.lead.list", {
-            "STATUS_ID": "NEW",
-            ">=DATE_CREATE": (now - timedelta(days=LOOKBACK_DAYS)).isoformat(),
-        }, LEAD_FIELDS, {"ID": "ASC"})
+    def leads(self, now, extra_ids=()):
+        since = (now - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        leads = self.b24.list("crm.lead.list", {"STATUS_ID": "NEW", ">=DATE_CREATE": since}, LEAD_FIELDS, {"ID": "ASC"})
+        # лиды из реестра ведём и после смены статуса (например, Екатерина поставила «В работе»)
+        missing = [i for i in extra_ids if i not in {l["ID"] for l in leads}]
+        if missing:
+            leads += self.b24.list("crm.lead.list", {"ID": missing, ">=DATE_CREATE": since}, LEAD_FIELDS, {"ID": "ASC"})
         return leads
 
     def comments(self, lead_ids):
         return self.b24.lead_comments(lead_ids)
+
+    def add_comment(self, lead_id, text):
+        self.b24.call("crm.timeline.comment.add", {"fields": {"ENTITY_ID": int(lead_id), "ENTITY_TYPE": "lead", "COMMENT": text}})
 
     def repeat_of(self, lead, now):
         """Было ли обращение с того же Telegram ID за 60 дней: другой лид или сделка. Возвращает описание или ''."""
@@ -97,7 +106,7 @@ class OfflineSource:
     def __init__(self, path):
         self.d = json.loads(Path(path).read_text(encoding="utf-8"))
 
-    def leads(self, now):
+    def leads(self, now, extra_ids=()):
         return self.d["leads"]
 
     def comments(self, ids):
@@ -105,6 +114,63 @@ class OfflineSource:
 
     def repeat_of(self, lead, now):
         return self.d.get("repeat", {}).get(lead["ID"], "")
+
+    def add_comment(self, lead_id, text):
+        pass  # в тестах комментарий виден в DATA/live_offline.json (Live.handover)
+
+
+class Live:
+    """Боевые действия по лидам из реестра: ответ клиенту, комментарий «ТЗ», сообщение Екатерине.
+    offline=True — ничего не отправляет, пишет в DATA/live_offline.json (для тестов)."""
+
+    def __init__(self, env, source, offline=False):
+        self.env, self.source, self.offline = env, source, offline
+        self.channel = None
+
+    def _offline(self, kind, **kw):
+        path = DATA / "live_offline.json"
+        rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        rows.append({"kind": kind, **kw})
+        path.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    def send(self, lead, external, text):
+        """Ответ клиенту через Wazzup: chatId из реестра или Telegram ID лида, иначе телефон."""
+        chat_id = next((str(e["chat_id"]) for e in reversed(external) if e.get("chat_id")), "") or str(lead.get(TG_ID_LEAD) or "")
+        phone = next((digits(e["phone"]) for e in reversed(external) if e.get("phone")), "") \
+            or next((digits(p.get("VALUE")) for p in lead.get("PHONE") or []), "")
+        if not (chat_id or phone):
+            raise RuntimeError("некуда отправить: нет chatId и телефона")
+        if self.offline:
+            return self._offline("send", lead=lead["ID"], chat_id=chat_id, phone=phone, text=text)
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from inbound_leads import wazzup, wazzup_channel
+        self.channel = self.channel or wazzup_channel(self.env)
+        body = {"channelId": self.channel, "chatType": "telegram", "text": text}
+        body.update({"chatId": chat_id} if chat_id else {"phone": phone})
+        wazzup(self.env, "message", body)
+
+    def handover(self, lead, reason, tz):
+        """Комментарий «ТЗ (собрал ассистент)» в лид и сообщение Екатерине в Telegram (копия владельцу)."""
+        title = lead.get("TITLE") or lead.get("NAME") or lead["ID"]
+        text = (f"Катя, ассистент собрал ТЗ: {title} (лид {lead['ID']}).\nПричина передачи: {reason}\n\n{tz}\n\n"
+                f"Лид: https://90gradusov.bitrix24.ru/crm/lead/details/{lead['ID']}/")
+        if self.offline:
+            return self._offline("handover", lead=lead["ID"], text=text)
+        self.source.add_comment(lead["ID"], f"ТЗ (собрал ассистент). Причина передачи: {reason}\n\n{tz}")
+        cfg = json.loads(NOTIFY_CFG.read_text(encoding="utf-8")) if NOTIFY_CFG.exists() else {}
+        katya = str(cfg.get("katya_chat_id") or "")
+        if katya:
+            tg_message(self.env, katya, text)
+            tg_message(self.env, self.env["TG_CHAT_ID"], "Копия (тест ассистента):\n\n" + text)
+        else:
+            tg_message(self.env, self.env["TG_CHAT_ID"], "⚠️ Чат Екатерины с ботом не настроен — перешлите ей:\n\n" + text)
+
+
+def tg_message(env, chat_id, text):
+    import urllib.parse
+    import urllib.request
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text[:4000]}).encode()
+    urllib.request.urlopen(f"https://api.telegram.org/bot{env['TG_BOT_TOKEN']}/sendMessage", data=data, timeout=30)
 
 
 def fake_decide(transcript, context):
@@ -184,7 +250,7 @@ def transcript(msgs, drafts):
     for d in drafts:
         if chat.norm(d["reply"]) in in_chat:
             continue  # уже есть в переписке
-        if d.get("external"):  # реально отправлено скриптом заявок — ставим по времени
+        if d.get("external") or d.get("sent"):  # реально отправлено (скриптом заявок или агентом) — по времени
             lines.append((datetime.fromisoformat(d["iso"]), f"[{d['time']}] Ассистент: {d['reply']}"))
         else:  # в режиме «тень» сообщения ассистента в чат не уходят — добавляем черновики, чтобы диалог был связным
             tail.append(f"[{d['time']}] Ассистент (черновик): {d['reply']}")
@@ -197,13 +263,17 @@ def own_account(lead, ignore_tg):
     return lead.get(TG_ID_LEAD) in ignore_tg or username in ignore_tg
 
 
-def process(lead, msgs, st, now, source, decide_fn, out, ignore_tg=frozenset(), external=()):
-    """external — записи реестра приветствий по этому лиду (или по нашему лиду, с которым он связан)."""
+def process(lead, msgs, st, now, source, decide_fn, out, ignore_tg=frozenset(), external=(), live=None):
+    """external — записи реестра приветствий по этому лиду (или по нашему лиду, с которым он связан).
+    live — боевые действия (Live); применяются только к лидам из реестра."""
     lid = lead["ID"]
+    live = live if external else None
     if external:
         adopt_external(st, external)
     sent = {chat.norm(x) for x in st.get("sent", [])}
-    client_msgs = [m for m in msgs if m["who"] == "c"]
+    # свои тексты — не сообщения клиента, даже если Wazzup подписал их не «Телефон:»
+    # (НЕ ПРОВЕРЕНО, как Wazzup подписывает в таймлайне сообщения, отправленные через API)
+    client_msgs = [m for m in msgs if m["who"] == "c" and chat.norm(m["text"]) not in sent]
     manager_msgs = [m for m in msgs if m["who"] == "m" and chat.norm(m["text"]) not in sent]
 
     if st.get("status") in ("manager", "handed_over", "skip", "linked"):
@@ -249,11 +319,11 @@ def process(lead, msgs, st, now, source, decide_fn, out, ignore_tg=frozenset(), 
     elif st["status"] == "active":
         drafts = st.get("drafts", [])
         if len(drafts) >= MAX_AGENT_MSGS:
-            return handover(lead, st, now, out, "ассистент написал 4 сообщения, ТЗ не собрано")
+            return handover(lead, st, now, out, "ассистент написал 4 сообщения, ТЗ не собрано", live)
         if not new_client:
             last_t = datetime.fromisoformat(st["last_action"])
             if (now - last_t).total_seconds() > CLIENT_SILENCE_HOURS * 3600:
-                return handover(lead, st, now, out, f"клиент молчит {CLIENT_SILENCE_HOURS} ч")
+                return handover(lead, st, now, out, f"клиент молчит {CLIENT_SILENCE_HOURS} ч", live)
             return
         reason = "новое сообщение клиента"
     else:
@@ -269,40 +339,54 @@ def process(lead, msgs, st, now, source, decide_fn, out, ignore_tg=frozenset(), 
     ])
     tr = transcript(msgs, st.get("drafts", []))
     d = decide_fn(tr, context)
+    if live and d.reply:
+        live.send(lead, external, d.reply)  # ошибка — исключение до изменения состояния: следующий проход повторит
 
     st["status"] = "active"
-    st["last_seen"] = msgs[-1]["id"]
+    st["last_seen"] = msgs[-1]["id"] if msgs else st.get("last_seen", 0)
     st["last_action"] = now.isoformat()
-    st.setdefault("drafts", []).append({"time": f"{now.astimezone(chat.MSK):%d.%m %H:%M}", "reply": d.reply})
+    draft = {"time": f"{now.astimezone(chat.MSK):%d.%m %H:%M}", "reply": d.reply}
+    if live and d.reply:
+        draft.update(sent=True, iso=now.isoformat())
+        st.setdefault("sent", []).append(d.reply)
+    st.setdefault("drafts", []).append(draft)
     st["tz"] = d.tz.model_dump()
 
     from llm import tz_text
     out.append(
-        f"## Лид {lid} — {lead.get('TITLE')} — {now.astimezone(chat.MSK):%d.%m %H:%M}\n"
+        f"## Лид {lid} — {lead.get('TITLE')} — {now.astimezone(chat.MSK):%d.%m %H:%M}{' — ЖИВОЙ РЕЖИМ' if live else ''}\n"
         f"Повод: {reason}. {'Передать Екатерине: ' + d.handover_reason if d.handover else ''}\n\n"
         f"Переписка:\n```\n{tr}\n```\n\n"
-        f"Ассистент отправил бы:\n> " + (d.reply.replace("\n", "\n> ") or "(ничего)") + "\n\n"
+        f"Ассистент {'отправил' if live and d.reply else 'отправил бы'}:\n> " + (d.reply.replace("\n", "\n> ") or "(ничего)") + "\n\n"
         f"ТЗ сейчас{' (проект)' if d.project else ''}:\n```\n{tz_text(d.tz)}\n```\n"
         f"Не хватает: {', '.join(d.missing) or '—'}\n"
     )
-    log(f"лид {lid}: черновик ({reason}){', передача: ' + d.handover_reason if d.handover else ''}")
+    log(f"лид {lid}: {'отправлено клиенту' if live and d.reply else 'черновик'} ({reason})"
+        f"{', передача: ' + d.handover_reason if d.handover else ''}")
     if d.handover:
-        st.update(status="handed_over", note=d.handover_reason)
+        handover(lead, st, now, out, d.handover_reason, live, record=False)
 
 
-def handover(lead, st, now, out, reason):
+def handover(lead, st, now, out, reason, live=None, record=True):
     from llm import TZ, tz_text
     st.update(status="handed_over", note=reason, last_action=now.isoformat())
     tz = tz_text(TZ(**st["tz"])) if st.get("tz") else "—"
-    out.append(f"## Лид {lead['ID']} — {lead.get('TITLE')} — передача Екатерине\nПричина: {reason}\n\n```\n{tz}\n```\n")
+    if record:
+        out.append(f"## Лид {lead['ID']} — {lead.get('TITLE')} — передача Екатерине\nПричина: {reason}\n\n```\n{tz}\n```\n")
     log(f"лид {lead['ID']}: передача Екатерине ({reason})")
+    if live:
+        try:
+            live.handover(lead, reason, tz)
+            log(f"лид {lead['ID']}: ТЗ записано в лид, Екатерине отправлено в Telegram")
+        except Exception as e:  # передача уже в состоянии — не повторяем, но пишем ОШИБКУ в журнал
+            log(f"лид {lead['ID']}: ОШИБКА передачи Екатерине: {type(e).__name__}: {e}")
 
 
 def notify(env, text):
     if env.get("CLIENT_AGENT_TG_NOTIFY", "1") != "1" or not env.get("TG_BOT_TOKEN"):
         return
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        f.write("👤 Ассистент (тень)\n\n" + text)
+        f.write(("👤 Ассистент (живой режим)" if "ЖИВОЙ РЕЖИМ" in text else "👤 Ассистент (тень)") + "\n\n" + text)
     try:
         subprocess.run([str(ROOT / "scripts" / "tg_send.sh"), f.name], check=True, capture_output=True, timeout=60)
     except Exception as e:
@@ -317,6 +401,7 @@ def main():
     ap.add_argument("--fake-llm", action="store_true", help="не вызывать Claude (проверка логики)")
     ap.add_argument("--now", help="подставить текущее время (ISO)")
     ap.add_argument("--state", help="файл состояния (по умолчанию data/client_agent/state.json)")
+    ap.add_argument("--live-until", help="боевой режим для лидов из реестра до этого момента (ISO), потом снова «тень»")
     args = ap.parse_args()
 
     global DATA
@@ -354,7 +439,10 @@ def main():
     ignore_path = ROOT / "data" / "client_agent" / "ignore_tg.txt"  # свои аккаунты: бот, сотрудники, партнёры — по одному Telegram ID в строке
     ignore_tg = {x.split("#")[0].strip().lower() for x in ignore_path.read_text(encoding="utf-8").splitlines()} if ignore_path.exists() else set()
     ignore_tg.discard("")
-    leads = [l for l in source.leads(now) if wanted(l, registry)]
+    live = None
+    if args.live_until and now < datetime.fromisoformat(args.live_until):
+        live = Live(env, source, offline=bool(args.offline))
+    leads = [l for l in source.leads(now, list(registry)) if wanted(l, registry)]
     comments = source.comments([l["ID"] for l in leads]) if leads else {}
     out = []
     links = {}  # лид Wazzup → наш лид (ответ клиента пришёл не в наш лид)
@@ -372,7 +460,7 @@ def main():
         st = state.setdefault(lead["ID"], {})
         try:
             process(lead, chat.parse(comments.get(lead["ID"], [])), st, now, source, decide_fn, out, ignore_tg,
-                    registry.get(links.get(lead["ID"], lead["ID"]), ()))
+                    registry.get(links.get(lead["ID"], lead["ID"]), ()), live)
         except Exception as e:  # одна ошибка не должна останавливать остальные лиды
             log(f"лид {lead['ID']}: ОШИБКА {type(e).__name__}: {e}")
 
