@@ -27,7 +27,10 @@ import anthropic
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client_agent"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tz_cards"))
+import card  # noqa: E402
 import gdrive  # noqa: E402
+import tgread  # noqa: E402
 import make_kp  # noqa: E402
 import orders  # noqa: E402
 import parse  # noqa: E402
@@ -44,6 +47,7 @@ FILES = DATA / "files"
 OUT = ROOT / "data" / "kp" / "out"
 STATE = DATA / "state.json"
 QUIET_SEC = 6          # всё, что пришло с паузами меньше этого, — одна заявка
+ALBUM_QUIET_SEC = 15   # для альбома (media_group): Telegram досылает файлы альбома с задержкой
 MAX_JOBS = 1500        # сколько ссылок «сообщение -> заявка» помнить для правок (несколько на заявку)
 NET_TRIES, NET_PAUSE = 3, 5  # повторы при сбое сети: попыток, пауза (с, растёт)
 CONTRACTS_OUT = ROOT / "data" / "contracts" / "out"
@@ -147,6 +151,8 @@ def load_state():
     st = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"offset": 0, "jobs": {}}
     for k in ("orders", "active", "msg_orders"):  # заказы; активный заказ чата; сообщение -> заказ
         st.setdefault(k, {})
+    for k in ("tz", "tz_msgs", "tz_last"):  # черновики карточек ТЗ; сообщение -> черновик; чат -> последнее прочитанное
+        st.setdefault(k, {})
     return st
 
 
@@ -195,14 +201,15 @@ def download(tg, msg):
     out = []
     if msg.get("photo"):
         ph = msg["photo"][-1]
-        out.append(tg.download(ph["file_id"], FILES / str(chat) / f"{ph['file_unique_id']}.jpg"))
+        out.append(tg.download(ph["file_id"], FILES / str(chat) / ph["file_unique_id"] / "фото.jpg"))
     doc = msg.get("document")
     if doc:
         name = doc.get("file_name") or ""
         ext = DOC_EXT.get(doc.get("mime_type", "")) or (Path(name).suffix.lower() if Path(name).suffix.lower() in
                                                        (".pdf", ".png", ".jpg", ".jpeg", ".docx") else None)
         if ext:
-            out.append(tg.download(doc["file_id"], FILES / str(chat) / f"{doc['file_unique_id']}{ext}"))
+            safe = re.sub(r'[\\/:*?"<>|]+', "_", Path(name).stem)[:80] or "файл"
+            out.append(tg.download(doc["file_id"], FILES / str(chat) / doc["file_unique_id"] / f"{safe}{ext}"))
         else:
             tg.send(chat, f"Файл «{name}» не читаю: подходят фото, PDF, PNG/JPG и Word (.docx).", msg["message_id"])
     return out
@@ -369,7 +376,7 @@ def summary(kp, path, items_total, log_sum, warns, link=None):
     if log_sum:
         lines.append(f"Доставка/монтаж: {make_kp.money(log_sum)}")
     lines.append(f"Срок: {kp.production_term} раб. дней")
-    notes = list(kp.questions) + warns
+    notes = clean_questions(kp.questions) + warns
     if notes:
         lines += ["", "Проверьте:"] + [f"– {x}" for x in notes]
     lines += ["", "Правка — ответьте на это сообщение."]
@@ -383,7 +390,7 @@ def contract_summary(r, c, link, kp_name=None):
         "", f"Заказчик: {make_contract.customer_short(make_contract.dashes(parse_contract.to_make_contract(c))['customer'])}",
         f"Итого: {make_kp.money(r['total'])}", f"Оплата: {pay}",
         f"Срок производства: {c.schedule.production_days} раб. дней"]
-    notes = list(c.questions)[:3] + r["warnings"]
+    notes = clean_questions(c.questions)[:3] + r["warnings"]
     if notes:
         lines += ["", "Проверьте:"] + [f"– {x}" for x in notes]
     lines += ["", "Перед отправкой клиенту просмотрите каждую страницу (чек-лист договоров).",
@@ -436,8 +443,8 @@ def send_contract(tg, chat, reply_to, c, kp=None, folder=None):
 
 INVOICE = re.compile(r"\b(выстав\w*|нуж\w*|сдела\w*|сформир\w*|подготов\w*)\b[^.\n]{0,25}\bсч[её]т|^\s*сч[её]т\b",
                      re.IGNORECASE | re.MULTILINE)
-INVOICE_REPLY = ("Счёт с нуля пока не выставляю: ждём доступ к 1С. Сейчас: счёт в 1С (инструкция docs/16) → PDF сюда — "
-                 "поставлю подпись и печать.")
+INVOICE_REPLY = ("Счёт с нуля пока не выставляю: ждём доступ к 1С. Сейчас так: выставьте счёт в 1С (Печать → «Счет на оплату»), "
+                 "сохраните PDF и пришлите сюда — поставлю подпись и печать.")
 MAX_MSG_LINKS = 3000  # сколько ссылок «сообщение -> заказ» помнить
 
 
@@ -570,7 +577,7 @@ def ingest(tg, client, env, st, o, b):
         if o.get("deal_id") and not kp.deal_id:
             kp.deal_id = o["deal_id"]
         o["kp"], o["kp_updated"], kp_changed = kp.model_dump(), now, True
-        o["questions"] = list(kp.questions)
+        o["questions"] = clean_questions(kp.questions)
     contract_inputs = by("requisites", "contract", "kp")
     if rt.contract_update or rt.build_contract or contract_inputs:
         imgs = [f for f in by("requisites", "contract") if f.suffix.lower() in (".jpg", ".jpeg", ".png")]
@@ -579,7 +586,7 @@ def ingest(tg, client, env, st, o, b):
         c = parse_contract.parse(client, "\n\n".join(x for x in (text, words) if x) or "(файлы без текста)", imgs,
                                  o.get("kp"), contract_model(o), pdfs)
         o["contract"], o["contract_updated"] = c.model_dump(), now
-        o["questions"] = list(c.questions)
+        o["questions"] = clean_questions(c.questions)
     o["updated"] = now
     if rt.reply and not (kp_changed or o["contract_updated"] == now):
         tg.send(chat, rt.reply, b["reply_to"])
@@ -588,10 +595,16 @@ def ingest(tg, client, env, st, o, b):
     kp_ready = o.get("kp") and not parse.missing(parse.KP.model_validate(o["kp"]))
     if kp_ready and (rt.build_kp or (kp_changed and not by("kp") and (text or task_files))):
         build_kp(tg, env, o, b["reply_to"], b.get("sender", ""))
-    if rt.build_contract and o.get("contract"):
-        build_contract(tg, client, o, b["reply_to"])
+    contract_changed = o.get("contract_updated") == now
+    if o.get("contract") and (rt.build_contract or (o["docs"].get("contract") and (contract_changed or kp_changed))):
+        build_contract(tg, client, o, b["reply_to"])  # собранный договор держим актуальным без лишней кнопки
     log(f"чат {chat}: заказ {o['id']}: файлов {len(files)}, КП {'да' if kp_changed else 'нет'}, "
         f"договор {'да' if o['contract_updated'] == now else 'нет'}, сборка КП {rt.build_kp}, договора {rt.build_contract}")
+
+
+def clean_questions(qs):
+    """Вопросы Claude без повторного «Проверьте:» в начале."""
+    return [re.sub(r"^\s*проверьте\s*:\s*", "", q, flags=re.IGNORECASE).strip() for q in qs if q.strip()]
 
 
 def pdf_text_safe(f):
@@ -683,6 +696,129 @@ def on_button(tg, client, env, st, chat, data, msg_id):
     save_state(st)
 
 
+# --- карточки с ТЗ из Telegram-чатов владельца (docs/18_карточки_ТЗ.md) ---
+
+TZ_DEPTHS = [("За сутки", "1d"), ("За 3 дня", "3d"), ("За неделю", "7d"), ("Последние 50", "50")]
+TZ_ASSIGNEES = "Василиса:81,Андреев:27,Полина:49,Савин:89"
+
+
+def tz_owner(user, env):
+    owners = {x.strip().lstrip("@").lower() for x in env.get("TZ_OWNER_IDS", "").split(",") if x.strip()}
+    return allowed(user, owners)
+
+
+def tz_assignees(env):
+    return [(n.strip(), int(i)) for n, i in (x.split(":") for x in env.get("TZ_ASSIGNEES", TZ_ASSIGNEES).split(","))]
+
+
+def tz_previews(files):
+    out = []
+    for i, f in enumerate(files):
+        suf = f.suffix.lower()
+        try:
+            if suf in (".jpg", ".jpeg", ".png"):
+                out.append((f, orders.preview(f, i)))
+            elif suf == ".pdf":
+                out.append((f, orders.preview(f, i, pdf_pages(f, 1)[0])))
+            elif suf == ".docx":
+                out.append((f, orders.preview(f, i, words=docx_text(f))))
+            else:
+                out.append((f, [{"type": "text", "text": f"Файл {i}: «{f.name}» (содержимое не показано)"}]))
+        except Exception as e:
+            log(f"ТЗ: превью {f.name} не сделано ({e})")
+            out.append((f, [{"type": "text", "text": f"Файл {i}: «{f.name}» (не открылся)"}]))
+    return out
+
+
+def tz_show(tg, env, st, chat, did, reply_to=None):
+    t = st["tz"][did]
+    name = next((n for n, i in tz_assignees(env) if i == t.get("assignee")), "")
+    buttons = [(("✓ " if n == name else "") + n, f"tza:{did}:{i}") for n, i in tz_assignees(env)]
+    buttons += [("Создать в Б24", f"tzok:{did}"), ("Отмена", f"tzx:{did}")]
+    m = tg.ask(chat, card.summary(t["draft"], t["files"], name), buttons, reply_to)
+    st["tz_msgs"][f"{chat}:{m['message_id']}"] = did
+
+
+def tz_command(tg, env, chat, query, reply_to):
+    tg.send(chat, "Ищу чаты…", reply_to)
+    found = tgread.dialogs(env, query)
+    if not found:
+        tg.send(chat, f"Чатов «{query}» не нашёл. Попробуйте часть названия: /tz обинов")
+        return
+    tg.ask(chat, "Из какого чата карточка?", [(n[:40], f"tzc:{i}") for i, n in found], reply_to, per_row=1)
+
+
+def tz_button(tg, client, env, st, chat, data, msg_id):
+    action, _, arg = data.partition(":")
+    if action == "tzc":
+        buttons = [(t, f"tzd:{arg}:{d}") for t, d in TZ_DEPTHS]
+        if st["tz_last"].get(arg):
+            buttons.insert(0, ("С прошлой карточки", f"tzd:{arg}:last"))
+        tg.ask(chat, "Сколько переписки брать?", buttons, msg_id)
+        return
+    if action == "tzd":
+        src, _, depth = arg.partition(":")
+        did = "t" + uuid.uuid4().hex[:6]
+        tg.send(chat, "Читаю переписку и файлы…", msg_id)
+        got = tgread.fetch(env, int(src), depth, DATA / "tz" / did, st["tz_last"].get(src, 0))
+        if not got["text"]:
+            tg.send(chat, "В этом периоде сообщений нет. Возьмите период больше.")
+            return
+        skipped = f", пропущено {len(got['skipped'])}" if got["skipped"] else ""
+        tg.send(chat, f"«{got['chat']}»: {got['text'].count(chr(10)) + 1} сообщений, файлов {len(got['files'])}{skipped}. Собираю черновик…")
+        d = card.extract(client, got["chat"], got["text"], tz_previews(got["files"]))
+        st["tz"][did] = {"chat": chat, "src": src, "src_title": got["chat"], "text": got["text"], "last_id": got["last_id"],
+                         "files": [str(f) for f in got["files"]], "draft": d.model_dump(), "assignee": None, "deal_id": None,
+                         "created": datetime.now().isoformat(timespec="seconds")}
+        tz_show(tg, env, st, chat, did)
+        return
+    did, _, uid = arg.partition(":")
+    t = st["tz"].get(did)
+    if not t:
+        tg.send(chat, "Черновик не найден. /tz — заново.")
+        return
+    if t.get("deal_id"):
+        tg.send(chat, f"Карточка уже создана: сделка {t['deal_id']}.")
+        return
+    if action == "tzx":
+        st["tz"].pop(did)
+        tg.send(chat, "Черновик отменён, в Б24 ничего не создано.")
+        return
+    if action == "tza":
+        t["assignee"] = int(uid)
+        tz_show(tg, env, st, chat, did, msg_id)
+        return
+    if action == "tzok":
+        if not t.get("assignee"):
+            tg.send(chat, "Сначала выберите ответственного (кнопка с именем).", msg_id)
+            return
+        hook = env.get("TZ_B24_WEBHOOK")
+        if not hook:
+            tg.send(chat, "Нет TZ_B24_WEBHOOK в .env — создавать сделки нечем.")
+            return
+        from b24 import B24
+        api = B24(hook)
+        tz_file = card.tz_docx(t["draft"], t["src_title"], DATA / "tz" / did)
+        deal_id = card.create(api, t["draft"], t["files"], t["assignee"], t["src_title"], tz_file,
+                              env.get("TZ_STAGE", card.STAGE))
+        t["deal_id"] = deal_id
+        st["tz_last"][t["src"]] = t["last_id"]
+        log(f"ТЗ: создана сделка {deal_id} «{t['draft']['title']}» из чата {t['src']}")
+        tg.send(chat, f"Создано: сделка {deal_id} «{t['draft']['title']}»\n{card.deal_url(hook, deal_id)}", msg_id)
+
+
+def tz_fix(tg, client, env, st, chat, did, text, reply_to):
+    t = st["tz"][did]
+    if t.get("deal_id"):
+        tg.send(chat, f"Карточка уже создана (сделка {t['deal_id']}) — правьте в Б24.", reply_to)
+        return
+    tg.send(chat, "Правлю черновик…", reply_to)
+    files = [Path(f) for f in t["files"]]
+    d = card.extract(client, t["src_title"], t["text"], tz_previews(files), t["draft"], text)
+    t["draft"] = d.model_dump()
+    tz_show(tg, env, st, chat, did)
+
+
 def main():
     env = load_env()
     tg = TG(env["KP_TG_BOT_TOKEN"])
@@ -719,8 +855,14 @@ def main():
                     continue
                 chat = cb["message"]["chat"]["id"]
                 log(f"кнопка: {cb.get('data')} чат {chat}")
+                data = cb.get("data") or ""
                 try:
-                    on_button(tg, client, env, st, chat, cb.get("data") or "", cb["message"]["message_id"])
+                    if data.startswith("tz"):
+                        if tz_owner(cb.get("from", {}), env):
+                            tz_button(tg, client, env, st, chat, data, cb["message"]["message_id"])
+                            save_state(st)
+                        continue
+                    on_button(tg, client, env, st, chat, data, cb["message"]["message_id"])
                 except Exception as e:
                     log(f"чат {chat}: ошибка {e}\n{traceback.format_exc()}")
                     tg.send(chat, f"Ошибка: {e}. Попробуйте ещё раз или напишите Дмитрию.")
@@ -742,6 +884,18 @@ def main():
                 continue
             if text in ("/new", "/orders"):
                 on_button(tg, client, env, st, chat, "new:" if text == "/new" else "orders:", msg["message_id"])
+                continue
+            tz_reply = st["tz_msgs"].get(f"{chat}:{msg.get('reply_to_message', {}).get('message_id')}")
+            if tz_owner(user, env) and (text.split(" ")[0] == "/tz" or (tz_reply and text)):
+                try:
+                    if tz_reply:
+                        tz_fix(tg, client, env, st, chat, tz_reply, text, msg["message_id"])
+                    else:
+                        tz_command(tg, env, chat, text[3:].strip(), msg["message_id"])
+                except Exception as e:
+                    log(f"ТЗ: ошибка {e}\n{traceback.format_exc()}")
+                    tg.send(chat, f"Ошибка: {e}", msg["message_id"])
+                save_state(st)
                 continue
             if not text and not (msg.get("photo") or msg.get("document")):
                 kind = next((k for k in ("voice", "audio", "video", "video_note", "sticker", "animation") if msg.get(k)), None)
@@ -773,11 +927,12 @@ def main():
                     log(f"файл из ответа не скачан: {e}")
             b["files"] += [str(f) for f in files]
             b.setdefault("msg_ids", []).append(msg["message_id"])
+            b["album"] = b.get("album") or bool(msg.get("media_group_id"))
             b["last"] = time.time()
         save_state(st)
 
-        for chat, b in list(inbox.items()):  # заявка собрана (тишина QUIET_SEC)
-            if time.time() - b["last"] < QUIET_SEC:
+        for chat, b in list(inbox.items()):  # заявка собрана (тишина QUIET_SEC, у альбома — ALBUM_QUIET_SEC)
+            if time.time() - b["last"] < (ALBUM_QUIET_SEC if b.get("album") else QUIET_SEC):
                 continue
             inbox.pop(chat)
             if not b["texts"] and not b["files"]:

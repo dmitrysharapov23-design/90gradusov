@@ -181,7 +181,8 @@ def card(o, contract_missing, contract_card_ready):
     elif c:
         lines.append("❗ Договор: не хватает — " + "; ".join(miss))
     else:
-        lines.append("▫️ Договор: нужны КП и реквизиты")
+        need = [x for x, ok in (("КП или позиции с ценами", kp and kp.get("items")), ("реквизиты заказчика", False)) if not ok]
+        lines.append("▫️ Договор: нужны " + " и ".join(need))
     lines.append("▫️ Счёт: PDF из 1С сюда — поставлю подпись и печать")
     if o.get("questions"):
         lines += ["", "Проверьте:"] + [f"– {q}" for q in o["questions"][:3]]
