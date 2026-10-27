@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ru.90gradusov.manager-digest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/dmitrysharapov/Projects/90gradusov/.venv/bin/python</string>
+    <string>-W</string><string>ignore</string>
+    <string>/Users/dmitrysharapov/Projects/90gradusov/scripts/manager_digest.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/dmitrysharapov/Projects/90gradusov</string>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>/Users/dmitrysharapov/Projects/90gradusov/data/reports/digest_launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/dmitrysharapov/Projects/90gradusov/data/reports/digest_launchd.log</string>
+</dict>
+</plist>

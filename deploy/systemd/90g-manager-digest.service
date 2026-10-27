@@ -1,0 +1,12 @@
+# Утренний план менеджеру в Telegram (бывший launchd ru.90gradusov.manager-digest).
+[Unit]
+Description=90gradusov: утренний план менеджеру
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=gradus
+WorkingDirectory=/home/gradus/90gradusov
+ExecStart=/home/gradus/90gradusov/.venv/bin/python -W ignore /home/gradus/90gradusov/scripts/manager_digest.py
+StandardOutput=append:/home/gradus/90gradusov/data/reports/digest_launchd.log
+StandardError=append:/home/gradus/90gradusov/data/reports/digest_launchd.log

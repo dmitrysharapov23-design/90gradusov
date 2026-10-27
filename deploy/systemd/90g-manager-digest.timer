@@ -1,0 +1,9 @@
+[Unit]
+Description=90gradusov: утренний план менеджеру, пн–пт 10:00 МСК
+
+[Timer]
+OnCalendar=Mon..Fri 10:00 Europe/Moscow
+Persistent=true
+
+[Install]
+WantedBy=timers.target
