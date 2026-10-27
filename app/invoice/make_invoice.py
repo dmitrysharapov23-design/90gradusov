@@ -195,7 +195,7 @@ def draw(page, inv):
     if pid:
         t.text(318.6, 171.5, pid[:10], 6.0)
         t.text(318.6, 178.5, pid[10:], 6.0)
-    t.text(34.8, 192.8, f"Оплата по заказу клиента №{inv['number']}")
+    t.text(34.8, 192.8, inv.get("purpose") or f"Оплата по заказу клиента №{inv['number']}")
     t.text(34.3, 207.4, "Назначение платежа", 6.8)
 
     t.text(35.8, 233, f"Счет на оплату № {inv['number']} от {date_words(d)}", 12, True)
@@ -262,7 +262,7 @@ def draw(page, inv):
 
 
 def make_invoice(inv, out, stamp=True):
-    """inv: number, date (date), buyer {name, inn, kpp, address, phone}, items [{name, qty, unit, price}], payment_id.
+    """inv: number, date (date), buyer {name, inn, kpp, address, phone}, items [{name, qty, unit, price}], payment_id, purpose.
     Возвращает путь к PDF (с подписью и печатью, если stamp)."""
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

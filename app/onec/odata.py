@@ -230,8 +230,9 @@ class OneC:
                 raise
             return self._req("POST", entity, body={**body, "КонтактнаяИнформация": []})
 
-    def draft(self, customer, contract, total, comment=""):
-        """Новый заказ из шаблона: клиент, договор, одна строка на всю сумму, дата — сейчас."""
+    def draft(self, customer, contract, total, comment="", lines=None):
+        """Новый заказ из шаблона: клиент, договор, дата — сейчас. Строки: одна на всю сумму
+        или lines [(содержание, цена)] — номенклатура шаблона, текст строки в «Содержание» (доп. работы)."""
         t = self.template()
         old = {t.get("Партнер_Key"), t.get("Контрагент_Key"), t.get("Договор_Key")} - {None, EMPTY}
         new = {"Партнер_Key": customer.get("Партнер_Key") or EMPTY, "Контрагент_Key": customer["Ref_Key"],
@@ -259,14 +260,17 @@ class OneC:
         d["СуммаДокумента"] = total
         if not t.get("Товары"):
             raise OneCError("в шаблоне нет строк товаров")
-        row = {k: v for k, v in t["Товары"][0].items() if "@" not in k and k != "Ref_Key"}
-        row["ИдентификаторСтроки"] = str(uuid.uuid4())
-        for k in list(row):
+        base = {k: v for k, v in t["Товары"][0].items() if "@" not in k and k != "Ref_Key"}
+        for k in list(base):
             if k.startswith("Сумма") or k.startswith("Процент"):
-                row[k] = 0
-        row.update({"LineNumber": "1", "Количество": 1, "КоличествоУпаковок": 1, "Цена": total, "Сумма": total,
-                    "СуммаСНДС": total})
-        d["Товары"] = [row]
+                base[k] = 0
+        d["Товары"] = []
+        for i, (text, price) in enumerate(lines or [("", total)], 1):
+            d["Товары"].append({**base, "LineNumber": str(i), "КодСтроки": i, "ИдентификаторСтроки": str(uuid.uuid4()),
+                                "Содержание": text, "Количество": 1, "КоличествоУпаковок": 1, "Цена": price,
+                                "Сумма": price, "СуммаСНДС": price})
+        if "МаксимальныйКодСтроки" in d:
+            d["МаксимальныйКодСтроки"] = len(d["Товары"])
         if t.get("ЭтапыГрафикаОплаты"):
             stages, left = [], total
             for i, s in enumerate(t["ЭтапыГрафикаОплаты"]):
@@ -280,9 +284,9 @@ class OneC:
             d["ЭтапыГрафикаОплаты"] = stages
         return d, t
 
-    def create_order(self, customer, contract, total, comment=""):
-        """Создать и провести заказ -> {number, date, ref, posted}. Непроведённый заказ остаётся в 1С черновиком."""
-        body, _ = self.draft(customer, contract, total, comment)
+    def create_order(self, customer, contract, total, comment="", lines=None):
+        """Создать и провести заказ -> {number, date, ref, posted, payment_id, item}. Непроведённый остаётся черновиком."""
+        body, _ = self.draft(customer, contract, total, comment, lines)
         doc = self._req("POST", "Document_ЗаказКлиента", body=body)
         ref = doc["Ref_Key"]
         out = {"number": doc.get("Number", ""), "date": doc.get("Date", ""), "ref": ref, "posted": False}

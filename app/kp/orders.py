@@ -39,7 +39,10 @@ note — 3-8 слов, что в файле («КП, 3 позиции на 124 0
 - kp_update — есть данные для КП или его правка: позиции, цены, количество, размеры, материалы, срок, доставка/монтаж для КП, картинки к позициям;
 - contract_update — есть данные для договора: реквизиты заказчика, подписант, порядок оплаты, доставка/монтаж и адрес, срок чертежей, правка договора, готовое КП как основа договора;
 - build_kp — просят собрать/обновить КП; build_contract — просят собрать/обновить договор («договор», «сделай договор», «собери»);
-- invoice — просят выставить счёт;
+- invoice — просят выставить счёт; invoice_stage: prepay — предоплата, аванс, первый платёж, «70%»; final — остаток, постоплата,
+  доплата, окончательный расчёт, «30%»; full — на всю сумму, «100%»; иначе пусто;
+- extra_items — только если просят счёт на дополнительные работы сверх заказа («доп работы», «дополнительно»): каждая работа
+  с ценой в рублях (name, price); иначе пусто. Доп. работы не меняют КП и договор (kp_update и contract_update — false);
 - deal_id — номер сделки после «#», если есть; client_hint — имя клиента/компании/проекта, если видно (иначе пусто).
 reply — коротко ответь только если это вопрос к боту или непонятно, что делать (иначе пусто)."""
 
@@ -50,6 +53,11 @@ class FileKind(BaseModel):
     note: str
 
 
+class ExtraItem(BaseModel):
+    name: str
+    price: int
+
+
 class Route(BaseModel):
     files: List[FileKind]
     kp_update: bool
@@ -57,6 +65,8 @@ class Route(BaseModel):
     build_kp: bool
     build_contract: bool
     invoice: bool
+    invoice_stage: Literal["", "prepay", "final", "full"]
+    extra_items: List[ExtraItem]
     deal_id: str
     client_hint: str
     reply: str
@@ -131,6 +141,32 @@ def kp_items_total(kp):
                for it in kp.get("items", []))
 
 
+def invoice_total(o):
+    """Сумма заказа для счетов: договор (с доставкой и монтажом), иначе КП."""
+    d = o.get("docs", {})
+    return (d.get("contract") or d.get("kp") or {}).get("total")
+
+
+def pay_stages(o):
+    """Этапы оплаты по договору заказа (нет — 70/30) -> [(процент, сумма)]; как п. 3.2 договора: остаток — в последний."""
+    total = invoice_total(o) or 0
+    pcts = [x["percent"] for x in ((o.get("contract") or {}).get("payment") or [])] or [70, 30]
+    amounts = [total * x // 100 for x in pcts]
+    amounts[-1] = total - sum(amounts[:-1])
+    return list(zip(pcts, amounts))
+
+
+def migrate(o):
+    """Заказ до счетов по этапам (o["invoice"] — один счёт на всю сумму) -> o["onec"] + o["invoices"]["0"]."""
+    old = o.pop("invoice", None)
+    if old and not o.get("onec"):
+        o["onec"] = {"number": old["number"], "print": old["print"], "ref": old["ref"], "total": old["total"], "payment_id": ""}
+        o["invoices"] = {"0": {"print": old["print"], "pct": 100, "amount": old["total"], "path": old["path"], "at": old["at"]}}
+    o.setdefault("invoices", {})
+    o.setdefault("extras", [])
+    return o
+
+
 def contract_stale(o):
     return bool(o.get("contract") and o.get("kp") and o.get("kp_updated", "") > o.get("contract_updated", ""))
 
@@ -183,19 +219,25 @@ def card(o, contract_missing, contract_card_ready, onec=False):
     else:
         need = [x for x, ok in (("КП или позиции с ценами", kp and kp.get("items")), ("реквизиты заказчика", False)) if not ok]
         lines.append("▫️ Договор: нужны " + " и ".join(need))
-    inv = o.get("invoice")
-    total = (doc.get("contract") or doc.get("kp") or {}).get("total")
+    migrate(o)
+    total = invoice_total(o)
     can_invoice = onec and cust.get("full_name") and total
-    if inv:
-        stale = inv["total"] != total
-        lines.append(f"{'⚠️' if stale else '✅'} Счёт № {inv['print']} на {parse_money(inv['total'])}"
+    one = o.get("onec")
+    stages = pay_stages(o) if total else []
+    if one:
+        stale = one["total"] != total
+        lines.append(f"{'⚠️' if stale else '✅'} Заказ {one['print']} в 1С на {parse_money(one['total'])}"
                      + (" — сумма изменилась" if stale else ""))
+        for key, inv in sorted(o["invoices"].items()):
+            lines.append(f"   счёт № {inv['print']}: {inv['pct']}%, {parse_money(inv['amount'])}")
     elif can_invoice:
-        lines.append(f"▫️ Счёт: можно выставить на {parse_money(total)}")
+        lines.append("▫️ Счета: " + ", ".join(f"{p}% — {parse_money(a)}" for p, a in stages))
     elif onec:
         lines.append("▫️ Счёт: нужны реквизиты заказчика и КП или договор")
     else:
         lines.append("▫️ Счёт: PDF из 1С сюда — поставлю подпись и печать")
+    for e in o["extras"]:
+        lines.append(f"✅ Доп. работы: счёт № {e['print']} на {parse_money(e['total'])}")
     if o.get("questions"):
         lines += ["", "Проверьте:"] + [f"– {q}" for q in o["questions"][:3]]
     buttons = []
@@ -204,7 +246,12 @@ def card(o, contract_missing, contract_card_ready, onec=False):
     if c and not miss:
         buttons.append(("Обновить договор" if doc.get("contract") else "Собрать договор", f"contract:{o['id']}"))
     if can_invoice:
-        buttons.append(("Счёт" if inv else "Выставить счёт", f"invoice:{o['id']}"))
+        if len(stages) == 1:
+            buttons.append(("Выставить счёт", f"invoice:{o['id']}:1"))
+        else:
+            buttons += [(f"Счёт {p}%", f"invoice:{o['id']}:{i}") for i, (p, _) in enumerate(stages, 1)]
+    if onec and cust.get("full_name"):
+        buttons.append(("Счёт на доп. работы", f"extra:{o['id']}"))
     buttons += [("Заказы", "orders:"), ("Новый заказ", "new:")]
     return "\n".join(lines).replace(" ", " "), buttons
 
