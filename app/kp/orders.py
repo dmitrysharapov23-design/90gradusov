@@ -150,8 +150,8 @@ def order_text(o):
     return "\n".join(lines)
 
 
-def card(o, contract_missing, contract_card_ready):
-    """Карточка заказа -> (текст, кнопки). contract_missing/ready — из bot (по модели Contract)."""
+def card(o, contract_missing, contract_card_ready, onec=False):
+    """Карточка заказа -> (текст, кнопки). contract_missing/ready — из bot (по модели Contract); onec — подключена ли 1С."""
     lines = [f"📁 {title(o)}", ""]
     kp, doc = o.get("kp"), o.get("docs", {})
     if doc.get("kp"):
@@ -183,7 +183,19 @@ def card(o, contract_missing, contract_card_ready):
     else:
         need = [x for x, ok in (("КП или позиции с ценами", kp and kp.get("items")), ("реквизиты заказчика", False)) if not ok]
         lines.append("▫️ Договор: нужны " + " и ".join(need))
-    lines.append("▫️ Счёт: PDF из 1С сюда — поставлю подпись и печать")
+    inv = o.get("invoice")
+    total = (doc.get("contract") or doc.get("kp") or {}).get("total")
+    can_invoice = onec and cust.get("full_name") and total
+    if inv:
+        stale = inv["total"] != total
+        lines.append(f"{'⚠️' if stale else '✅'} Счёт № {inv['print']} на {parse_money(inv['total'])}"
+                     + (" — сумма изменилась" if stale else ""))
+    elif can_invoice:
+        lines.append(f"▫️ Счёт: можно выставить на {parse_money(total)}")
+    elif onec:
+        lines.append("▫️ Счёт: нужны реквизиты заказчика и КП или договор")
+    else:
+        lines.append("▫️ Счёт: PDF из 1С сюда — поставлю подпись и печать")
     if o.get("questions"):
         lines += ["", "Проверьте:"] + [f"– {q}" for q in o["questions"][:3]]
     buttons = []
@@ -191,6 +203,8 @@ def card(o, contract_missing, contract_card_ready):
         buttons.append(("Обновить КП" if doc.get("kp") else "Собрать КП", f"kp:{o['id']}"))
     if c and not miss:
         buttons.append(("Обновить договор" if doc.get("contract") else "Собрать договор", f"contract:{o['id']}"))
+    if can_invoice:
+        buttons.append(("Счёт" if inv else "Выставить счёт", f"invoice:{o['id']}"))
     buttons += [("Заказы", "orders:"), ("Новый заказ", "new:")]
     return "\n".join(lines).replace(" ", " "), buttons
 

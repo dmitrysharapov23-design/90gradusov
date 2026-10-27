@@ -4,7 +4,8 @@
 на Mac владельца; опрашивает Telegram, ничего не пишет в Б24 (только читает название сделки).
 
 Ключи в .env: KP_TG_BOT_TOKEN, KP_TG_ALLOWED_IDS (числовые ID или ники через запятую),
-ANTHROPIC_API_KEY, B24_AGENT_WEBHOOK (необязательно — название сделки).
+ANTHROPIC_API_KEY, B24_AGENT_WEBHOOK (необязательно — название сделки),
+ONEC_USER, ONEC_PASSWORD (необязательно — счёт через заказ в 1С, app/onec).
 
     .venv/bin/python app/kp/bot.py
 """
@@ -40,6 +41,8 @@ import parse_contract  # noqa: E402
 from agent import load_env  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.invoice_stamp.stamp import StampError, stamp_pdf  # noqa: E402
+from app.invoice.make_invoice import make_invoice  # noqa: E402
+from app.onec import odata  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "data" / "kp" / "bot"
@@ -51,6 +54,8 @@ ALBUM_QUIET_SEC = 15   # для альбома (media_group): Telegram досы�
 MAX_JOBS = 1500        # сколько ссылок «сообщение -> заявка» помнить для правок (несколько на заявку)
 NET_TRIES, NET_PAUSE = 3, 5  # повторы при сбое сети: попыток, пауза (с, растёт)
 CONTRACTS_OUT = ROOT / "data" / "contracts" / "out"
+INVOICES_OUT = ROOT / "data" / "invoices" / "out"
+ENV = {}  # .env, заполняет main (карточке нужно знать, подключена ли 1С)
 
 HELP = """Бот ведёт ЗАКАЗЫ. Присылайте всё по клиенту — задание, КП, реквизиты, чертежи, — в любом порядке, файлами или текстом. Бот сам поймёт, что это, и сложит в заказ.
 
@@ -64,6 +69,9 @@ HELP = """Бот ведёт ЗАКАЗЫ. Присылайте всё по кл�
 
 Файлы: фото, PDF, PNG/JPG, Word. Голосовые не разбираю.
 /orders — заказы, /new — новый заказ."""
+HELP_1C = ("• Счёт: выставьте в 1С, PDF сюда — поставлю подпись и печать.",
+           "• Счёт — кнопка «Выставить счёт» или слово «счёт»: создам заказ в 1С и пришлю счёт с подписью и печатью. "
+           "Счёт из 1С (PDF) тоже можно прислать — поставлю подпись и печать.")
 
 
 def log(msg):
@@ -465,7 +473,8 @@ def link_msgs(st, chat, oid, ids):
 
 
 def show_card(tg, st, o, reply_to=None):
-    text, buttons = orders.card(o, lambda d: contract_missing(parse_contract.Contract.model_validate(d)), None)
+    text, buttons = orders.card(o, lambda d: contract_missing(parse_contract.Contract.model_validate(d)), None,
+                                odata.configured(ENV))
     m = tg.ask(o["chat"], text, buttons, reply_to)
     link_msgs(st, o["chat"], o["id"], [m["message_id"]])
 
@@ -528,6 +537,69 @@ def build_contract(tg, client, o, reply_to):
                                  "at": datetime.now().isoformat(timespec="seconds")}
 
 
+def invoice_total(o):
+    """Сумма счёта: договор (с доставкой и монтажом), иначе КП. ДОПУЩЕНИЕ: счёт — на всю сумму заказа, как ЦБ-138."""
+    d = o.get("docs", {})
+    return (d.get("contract") or d.get("kp") or {}).get("total")
+
+
+def issue_invoice(tg, env, o, reply_to, again=False):
+    """Заказ клиента в 1С (OData) -> счёт PDF с подписью и печатью. Клиент и договор должны быть в 1С."""
+    chat = o["chat"]
+    cust = (o.get("contract") or {}).get("customer") or {}
+    total = invoice_total(o)
+    if not (cust.get("full_name") and (cust.get("inn") or cust.get("type") == "физлицо")):
+        tg.send(chat, "Для счёта нужны реквизиты заказчика — пришлите карточку предприятия (или данные физлица).", reply_to)
+        return
+    if not total:
+        tg.send(chat, "Для счёта нужна сумма — соберите КП или договор.", reply_to)
+        return
+    prev = o.get("invoice")
+    if prev and not again:
+        if prev["total"] == total and Path(prev["path"]).exists():
+            tg.send_file(chat, Path(prev["path"]), f"Счёт № {prev['print']} уже выставлен (заказ {prev['number']} в 1С).", reply_to)
+            return
+        tg.ask(chat, f"Счёт № {prev['print']} выставлен на {make_kp.money(prev['total'])}, а сейчас сумма {make_kp.money(total)}. "
+                     f"Выставить новый? Старый заказ {prev['number']} останется в 1С — отмените его там сами.",
+               [("Выставить новый счёт", f"invoice_new:{o['id']}")], reply_to)
+        return
+    tg.send(chat, "Создаю заказ в 1С…", reply_to)
+    try:
+        c = odata.OneC(env)
+        k = c.find_customer(cust.get("inn", ""), cust.get("kpp", ""), "" if cust.get("inn") else cust["full_name"])
+        who = cust.get("short_name") or cust["full_name"]
+        if not k:
+            tg.send(chat, f"В 1С нет клиента {who}" + (f" (ИНН {cust['inn']})" if cust.get("inn") else "") +
+                    ". Заведите клиента и договор «Договор 90 …» (инструкция 16, шаг 1) и нажмите «Выставить счёт» ещё раз.", reply_to)
+            return
+        dog = c.find_contract(k)
+        if not dog:
+            tg.send(chat, f"В 1С у клиента {k.get('Description')} нет договора с 90 ГРАДУСОВ. Заведите «Договор 90 …» "
+                          "(инструкция 16, шаг 1) и нажмите «Выставить счёт» ещё раз.", reply_to)
+            return
+        r = c.create_order(k, dog, total, f"Бот КП, заказ {orders.title(o)}")
+    except odata.OneCError as e:
+        log(f"1С: {e}")
+        tg.send(chat, f"1С не приняла заказ: {e}\nВыставьте счёт в 1С вручную (инструкция 16) — PDF сюда, поставлю подпись.", reply_to)
+        return
+    log(f"чат {chat}: заказ {o['id']}: 1С заказ {r['number']}, сумма {total}, проведён {r['posted']}")
+    if not r["posted"]:
+        tg.send(chat, f"Заказ {r['number']} создан в 1С, но не проведён: {r.get('error')}\n"
+                      "Откройте его в 1С, исправьте и проведите; счёт — Печать → «Счет на оплату», PDF сюда.", reply_to)
+        return
+    num = odata.print_number(r["number"])
+    d = datetime.fromisoformat(r["date"]).date() if r.get("date") else date.today()
+    buyer = {"name": cust.get("short_name") or cust["full_name"], "inn": cust.get("inn", ""), "kpp": cust.get("kpp", ""),
+             "address": cust.get("address", ""), "phone": cust.get("phone", "")}
+    path = make_invoice({"number": num, "date": d, "buyer": buyer, "payment_id": r.get("payment_id", ""),
+                         "items": [{"name": r["item"], "qty": 1, "price": total}]},
+                        INVOICES_OUT / f"Счет на оплату № {num} от {d:%d.%m.%Y}.pdf")
+    tg.send_file(chat, path, f"Счёт № {num} от {d:%d.%m.%Y} на {make_kp.money(total)} — заказ {r['number']} в 1С, "
+                             "с подписью и печатью. Проверьте реквизиты покупателя перед отправкой.", reply_to)
+    o["invoice"] = {"number": r["number"], "print": num, "total": total, "ref": r["ref"], "path": str(path),
+                    "at": datetime.now().isoformat(timespec="seconds")}
+
+
 def ingest(tg, client, env, st, o, b):
     """Разложить присланное по заказу, обновить данные, при необходимости собрать КП; показать карточку."""
     chat = o["chat"]
@@ -557,7 +629,7 @@ def ingest(tg, client, env, st, o, b):
         o["client"] = rt.client_hint
     if notes:
         tg.send(chat, "Принял:\n" + "\n".join(notes), b["reply_to"])
-    if rt.invoice and not (rt.kp_update or rt.contract_update):
+    if rt.invoice and not (rt.kp_update or rt.contract_update) and not odata.configured(env):
         tg.send(chat, INVOICE_REPLY, b["reply_to"])
 
     by = lambda *k: [f for i, f in enumerate(files) if (kinds.get(i) and kinds[i].kind in k)]
@@ -598,6 +670,8 @@ def ingest(tg, client, env, st, o, b):
     contract_changed = o.get("contract_updated") == now
     if o.get("contract") and (rt.build_contract or (o["docs"].get("contract") and (contract_changed or kp_changed))):
         build_contract(tg, client, o, b["reply_to"])  # собранный договор держим актуальным без лишней кнопки
+    if rt.invoice and odata.configured(env):
+        issue_invoice(tg, env, o, b["reply_to"])
     log(f"чат {chat}: заказ {o['id']}: файлов {len(files)}, КП {'да' if kp_changed else 'нет'}, "
         f"договор {'да' if o['contract_updated'] == now else 'нет'}, сборка КП {rt.build_kp}, договора {rt.build_contract}")
 
@@ -689,6 +763,8 @@ def on_button(tg, client, env, st, chat, data, msg_id):
             build_kp(tg, env, o, msg_id)
         elif action == "contract":
             build_contract(tg, client, o, msg_id)
+        elif action in ("invoice", "invoice_new"):
+            issue_invoice(tg, env, o, msg_id, again=action == "invoice_new")
         link_msgs(st, chat, o["id"], tg.sent)
     finally:
         save_state(st)
@@ -792,9 +868,9 @@ def tz_button(tg, client, env, st, chat, data, msg_id):
         if not t.get("assignee"):
             tg.send(chat, "Сначала выберите ответственного (кнопка с именем).", msg_id)
             return
-        hook = env.get("TZ_B24_WEBHOOK")
+        hook = env.get("TZ_B24_WEBHOOK") or env.get("B24_AGENT_WEBHOOK")
         if not hook:
-            tg.send(chat, "Нет TZ_B24_WEBHOOK в .env — создавать сделки нечем.")
+            tg.send(chat, "Нет вебхука Б24 (TZ_B24_WEBHOOK или B24_AGENT_WEBHOOK) в .env — создавать сделки нечем.")
             return
         from b24 import B24
         api = B24(hook)
@@ -821,6 +897,7 @@ def tz_fix(tg, client, env, st, chat, did, text, reply_to):
 
 def main():
     env = load_env()
+    ENV.update(env)
     tg = TG(env["KP_TG_BOT_TOKEN"])
     client = anthropic.Anthropic(api_key=env["ANTHROPIC_API_KEY"])
     allow = {x.strip().lstrip("@").lower() for x in env.get("KP_TG_ALLOWED_IDS", "").split(",") if x.strip()}
@@ -880,7 +957,7 @@ def main():
                 continue
             text = message_text(msg)
             if text in ("/start", "/help"):
-                tg.send(chat, HELP)
+                tg.send(chat, HELP.replace(*HELP_1C) if odata.configured(env) else HELP)
                 continue
             if text in ("/new", "/orders"):
                 on_button(tg, client, env, st, chat, "new:" if text == "/new" else "orders:", msg["message_id"])
