@@ -86,6 +86,30 @@ def ensure_field(b24, apply):
     return not exists
 
 
+def by_title(b24, since, skip):
+    """Производственные без номера, у которых продажная не указала «id сделки производства» (так у большинства старых):
+    берём продажную из лида с тем же названием — ровно одну, и контакт не должен расходиться."""
+    prods = [p for p in all_items(b24, "crm.deal.list", {"filter": {**since, "CATEGORY_ID": 3},
+                                                        "select": ["ID", "TITLE", "CONTACT_ID", FIELD]})
+             if not p.get(FIELD) and p["ID"] not in skip]
+    if not prods:
+        return []
+    sales = {}
+    for s in all_items(b24, "crm.deal.list", {"filter": {"CATEGORY_ID": 0, ">LEAD_ID": 0},
+                                              "select": ["ID", "TITLE", "LEAD_ID", "CONTACT_ID"]}):
+        sales.setdefault((s["TITLE"] or "").strip().lower(), []).append(s)
+    cmds = []
+    for p in prods:
+        same = sales.get((p["TITLE"] or "").strip().lower(), [])
+        if len(same) != 1:
+            continue
+        s = same[0]
+        if str(p.get("CONTACT_ID") or "0") not in ("0", str(s.get("CONTACT_ID") or "0")) and str(s.get("CONTACT_ID") or "0") != "0":
+            continue
+        cmds.append(("crm.deal.update", {"id": p["ID"], "fields": {FIELD: str(s["LEAD_ID"])}}))
+    return cmds
+
+
 def main(argv=None, b24=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
@@ -119,6 +143,7 @@ def main(argv=None, b24=None):
                 have[p["ID"]] = str(p.get(FIELD) or "")
         deal_cmds = [c for c in deal_cmds if not c[1].pop("_check", False)
                      or (c[1]["id"] in have and have[c[1]["id"]] != c[1]["fields"][FIELD])]
+    deal_cmds += by_title(b24, since, {c[1]["id"] for c in deal_cmds}) if not (new_field and not args.apply) else []
 
     if args.days and not (lead_cmds or deal_cmds):
         return 0
