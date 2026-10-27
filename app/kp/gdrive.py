@@ -52,7 +52,8 @@ def _state():
     return json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
 
 
-FOLDERS = {"kp": (FOLDER_NAME, "folder_id"), "contract": ("Договоры 90 градусов", "contracts_folder_id")}
+FOLDERS = {"kp": (FOLDER_NAME, "folder_id"), "contract": ("Договоры 90 градусов", "contracts_folder_id"),
+           "orders": ("Заказы 90 градусов", "orders_folder_id")}
 
 
 def folder(svc, kind="kp"):
@@ -78,6 +79,25 @@ def folder(svc, kind="kp"):
     return f["id"]
 
 
+def order_folder(svc, name):
+    """Подпапка заказа внутри «Заказы 90 градусов» (доступ — как у родительской папки)."""
+    root = folder(svc, "orders")
+    st = _state()
+    known = st.setdefault("order_folders", {})
+    if known.get(name):
+        try:
+            f = svc.files().get(fileId=known[name], fields="id,trashed").execute()
+            if not f.get("trashed"):
+                return known[name]
+        except Exception:
+            pass
+    f = svc.files().create(body={"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [root]},
+                           fields="id").execute()
+    known[name] = f["id"]
+    STATE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+    return f["id"]
+
+
 def share(email):
     """Открыть папку с КП сотруднику (редактор), без письма-уведомления."""
     svc = service()
@@ -95,11 +115,13 @@ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 DOCS_MIME = "application/vnd.google-apps.document"
 
 
-def upload(pptx: Path, kind="kp"):
-    """PPTX -> Google Презентация, DOCX -> Google Документ, в папке КП или договоров. -> (file_id, ссылка)."""
+def upload(pptx: Path, kind="kp", order=None):
+    """PPTX -> Google Презентация, DOCX -> Google Документ. order — имя папки заказа («715 ООО Ромашка»),
+    иначе папка КП / договоров. -> (file_id, ссылка)."""
     svc = service()
     is_doc = pptx.suffix.lower() == ".docx"
-    body = {"name": pptx.stem, "mimeType": DOCS_MIME if is_doc else SLIDES_MIME, "parents": [folder(svc, kind)]}
+    parent = order_folder(svc, order) if order else folder(svc, kind)
+    body = {"name": pptx.stem, "mimeType": DOCS_MIME if is_doc else SLIDES_MIME, "parents": [parent]}
     media = MediaFileUpload(str(pptx), mimetype=DOCX_MIME if is_doc else PPTX_MIME, resumable=True)
     f = svc.files().create(body=body, media_body=media, fields="id,webViewLink").execute()
     return f["id"], f["webViewLink"]
