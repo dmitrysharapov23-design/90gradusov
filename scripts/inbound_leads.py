@@ -386,6 +386,41 @@ def log(msg):
         f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
 
 
+PROD_ID_FIELD = "UF_CRM_1774429302636"   # «id сделки производства» в продажной сделке
+
+
+def fix_deals_without_contact(b24, days=3):
+    """Лид сконвертировали только в сделку, без контакта (так было с 723, 761, 765) — тогда в карточке нет клиента,
+    а повторное обращение не с чем сопоставить. Создаём контакт из лида (имя, телефон, Telegram ID и ник) или берём
+    существующий с тем же Telegram ID и привязываем к продажной и производственной сделке. Решение владельца 27.10.2026."""
+    since = (date.today() - timedelta(days=days)).isoformat()
+    deals = b24.call("crm.deal.list", {"filter": {"CATEGORY_ID": 0, "CONTACT_ID": 0, "COMPANY_ID": 0, ">LEAD_ID": 0,
+                                                  ">=DATE_CREATE": since}, "select": ["ID", "LEAD_ID", PROD_ID_FIELD]}) or []
+    for d in deals:
+        lead = b24.call("crm.lead.get", {"id": int(d["LEAD_ID"])})
+        tg = lead.get("UF_CRM_TELEGRAMID_WZ")
+        if not (tg or lead.get("PHONE")):
+            continue  # не из чего делать контакт — пусть решает менеджер
+        found = b24.call("crm.contact.list", {"filter": {"UF_CRM_TELEGRAMID_WZ": tg}, "select": ["ID"]}) if tg else []
+        if found:
+            cid = int(found[0]["ID"])
+        else:
+            fields = {"NAME": lead.get("NAME") or lead.get("TITLE"), "LAST_NAME": lead.get("LAST_NAME") or "",
+                      "ASSIGNED_BY_ID": MANAGER_ID, "SOURCE_ID": lead.get("SOURCE_ID"),
+                      "UF_CRM_TELEGRAMID_WZ": tg, "UF_CRM_TELEGRAMUSERNAME_WZ": lead.get("UF_CRM_TELEGRAMUSERNAME_WZ"),
+                      "COMMENTS": f"Создан автоматически: лид {lead['ID']} сконвертирован в сделку {d['ID']} без контакта."}
+            if lead.get("PHONE"):
+                fields["PHONE"] = [{"VALUE": p["VALUE"], "VALUE_TYPE": p.get("VALUE_TYPE", "WORK")} for p in lead["PHONE"]]
+            cid = b24.call("crm.contact.add", {"fields": fields})
+        targets = [d["ID"]]
+        prod = str(d.get(PROD_ID_FIELD) or "")
+        if prod.isdigit() and not b24.call("crm.deal.contact.items.get", {"id": int(prod)}):
+            targets.append(prod)  # у производственной трогаем, только если контакта там тоже нет
+        for deal_id in targets:
+            b24.call("crm.deal.contact.items.set", {"id": int(deal_id), "items": [{"CONTACT_ID": cid, "IS_PRIMARY": "Y"}]})
+        log(f"сделка {d['ID']} без контакта: привязан контакт {cid} ({'найден' if found else 'создан'}) к {', '.join(targets)}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default=(date.today() - timedelta(days=14)).isoformat())
@@ -421,6 +456,10 @@ def main():
     reqs += [from_site(l) for l in site if not l.get("CONTACT_ID")]
     if args.create:
         HEARTBEAT.write_text(datetime.now().astimezone().isoformat(), encoding="utf-8")  # для сторожа
+        try:
+            fix_deals_without_contact(b24)
+        except Exception as e:  # проверка сделок не должна мешать заявкам
+            log(f"сделки без контакта: ОШИБКА {e}")
         reqs = [r for r in reqs if r["src_id"] not in state["done"]]
     reqs.sort(key=lambda r: r["date"])
     if args.create and not reqs:
