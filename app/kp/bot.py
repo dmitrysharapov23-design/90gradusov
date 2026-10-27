@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import anthropic
@@ -30,32 +30,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client_agent"))
 import gdrive  # noqa: E402
 import make_kp  # noqa: E402
 import parse  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
+import make_contract  # noqa: E402
+import parse_contract  # noqa: E402
 from agent import load_env  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from app.invoice_stamp.stamp import StampError, stamp_pdf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "data" / "kp" / "bot"
 FILES = DATA / "files"
 OUT = ROOT / "data" / "kp" / "out"
 STATE = DATA / "state.json"
-QUIET_SEC = 4          # ждём хвост альбома после последнего сообщения
-BUFFER_MIN = 30        # картинки без задания живут столько минут
-MAX_JOBS = 300         # сколько последних КП помнить для правок
+QUIET_SEC = 6          # всё, что пришло с паузами меньше этого, — одна заявка
+MAX_JOBS = 1500        # сколько ссылок «сообщение -> заявка» помнить для правок (несколько на заявку)
 NET_TRIES, NET_PAUSE = 3, 5  # повторы при сбое сети: попыток, пауза (с, растёт)
 TRIGGER = re.compile(r"#\d+|\bкп\b", re.IGNORECASE)
+KP_FOR_CONTRACT_H = 24  # «договор» без ответа на КП и без #ID — берём последнее КП чата за столько часов
+CONTRACT = re.compile(r"\bдоговор", re.IGNORECASE)
+CONTRACTS_OUT = ROOT / "data" / "contracts" / "out"
 
-HELP = """Пришлите задание на КП одним сообщением (или подписью к альбому):
+HELP = """Присылайте всё, что есть, — файлы и пару слов. Бот поймёт, что нужно, или спросит кнопками.
 
-#715 КП
-1. Стеллаж 1695×350×3000, нержавейка, сатин, полки 2 мм, подсветка — 195 000
-2. Полки 4 шт 800×250, черная сталь RAL 9005 — 4 шт по 1 000
-Доставка с монтажом 125 000
-Срок 35
+СЧЁТ С ПОДПИСЬЮ: в 1С «Печать → Счет на оплату» (обычный) → сохранить PDF → прислать сюда. Бот вернёт его с подписью и печатью 90 ГРАДУСОВ.
 
-Картинки (чертежи, визуализации) прикладывайте к этому же сообщению альбомом или присылайте до него. PDF — тоже можно (берётся первая страница).
-Цены и срок — только утверждённые: бот их не считает и не меняет.
+КП: «КП» (или «#номер сделки») + позиции с утверждёнными ценами и срок, например:
+КП #715
+1. Стеллаж 1695×350×3000, нержавейка, сатин — 195 000
+2. Полки 4 шт 800×250, RAL 9005 — 4 000 за все
+Доставка с монтажом 125 000, срок 35
+Чертежи и визуализации — фото или PDF в этом же альбоме.
 
-Правка: ответьте (Reply) на сообщение с КП — «цена стеллажа 200 000», «убери доставку», «у полок финиш сатин». Придёт новая версия.
-/new — сбросить присланные картинки."""
+ДОГОВОР — по шагам: напишите «договор» (или нажмите кнопку), дальше присылайте КП и реквизиты заказчика — по одному или вместе, файлом (PDF, Word, фото) или текстом. После каждого бот покажет, что понял и чего не хватает. Когда всё есть — кнопка «Собрать договор». Уточнения — текстом: «оплата 100%», «доставка и монтаж входят, адрес …», «чертежи 6-8 дней».
+
+ПРАВКА готового: ответьте (Reply) на сводку КП или договора — «цена стеллажа 200 000», «убери доставку».
+СЧЁТ: пока не выставляю (ждём доступ к 1С).
+
+Файлы: фото, PDF (читаю целиком), PNG/JPG, Word (.docx). Голосовые не разбираю.
+/new — начать заново."""
 
 
 def log(msg):
@@ -68,6 +80,7 @@ def log(msg):
 
 class TG:
     def __init__(self, token):
+        self.sent = []  # id отправленных сообщений (execute собирает их по заявке)
         self.base = f"https://api.telegram.org/bot{token}/"
         self.file_base = f"https://api.telegram.org/file/bot{token}/"
 
@@ -92,10 +105,20 @@ class TG:
             log(f"Telegram {method}: ok")
         if not res.get("ok"):
             raise RuntimeError(f"Telegram {method}: {res.get('description')}")
+        if method == "sendMessage":
+            self.sent.append(res["result"]["message_id"])
         return res["result"]
 
     def send(self, chat, text, reply_to=None):
         p = {"chat_id": chat, "text": text[:4000]}
+        if reply_to:
+            p["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+        return self.call("sendMessage", p)
+
+    def ask(self, chat, text, buttons, reply_to=None):
+        """Сообщение с кнопками: buttons — [(подпись, данные)]."""
+        p = {"chat_id": chat, "text": text[:4000],
+             "reply_markup": {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in buttons]]}}
         if reply_to:
             p["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
         return self.call("sendMessage", p)
@@ -116,6 +139,7 @@ class TG:
         if not res.get("ok"):
             raise RuntimeError(f"Telegram sendDocument: {res.get('description')}")
         log(f"Telegram sendDocument: ok ({path.name})")
+        self.sent.append(res["result"]["message_id"])
         return res["result"]
 
     def download(self, file_id, dest):
@@ -127,9 +151,9 @@ class TG:
 
 
 def load_state():
-    if STATE.exists():
-        return json.loads(STATE.read_text(encoding="utf-8"))
-    return {"offset": 0, "jobs": {}}
+    st = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {"offset": 0, "jobs": {}}
+    st.setdefault("sessions", {})  # чат -> договор, который собирается пошагово
+    return st
 
 
 def save_state(st):
@@ -166,19 +190,13 @@ def allowed(user, allow):
     return str(user.get("id")) in allow or (user.get("username") or "").lower() in allow
 
 
-def to_image(path):
-    """PDF -> PNG первой страницы; картинки как есть."""
-    if path.suffix.lower() != ".pdf":
-        return path
-    import fitz  # pymupdf
-    doc = fitz.open(path)
-    png = path.with_suffix(".png")
-    doc[0].get_pixmap(dpi=150).save(png)
-    return png
+PDF_PAGES = 6  # страниц PDF -> картинки для КП (чертежи)
+DOC_EXT = {"application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg",
+           "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}
 
 
-def attachments(tg, msg):
-    """Файлы сообщения -> локальные пути (фото — самый крупный размер; документы — картинки и PDF)."""
+def download(tg, msg):
+    """Файлы сообщения -> локальные пути: фото (крупнейший размер), PDF, PNG/JPG, Word (.docx)."""
     chat = msg["chat"]["id"]
     out = []
     if msg.get("photo"):
@@ -186,13 +204,80 @@ def attachments(tg, msg):
         out.append(tg.download(ph["file_id"], FILES / str(chat) / f"{ph['file_unique_id']}.jpg"))
     doc = msg.get("document")
     if doc:
-        mime = doc.get("mime_type", "")
-        ext = {"application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg"}.get(mime)
+        name = doc.get("file_name") or ""
+        ext = DOC_EXT.get(doc.get("mime_type", "")) or (Path(name).suffix.lower() if Path(name).suffix.lower() in
+                                                       (".pdf", ".png", ".jpg", ".jpeg", ".docx") else None)
         if ext:
-            out.append(to_image(tg.download(doc["file_id"], FILES / str(chat) / f"{doc['file_unique_id']}{ext}")))
+            out.append(tg.download(doc["file_id"], FILES / str(chat) / f"{doc['file_unique_id']}{ext}"))
         else:
-            tg.send(chat, f"Файл «{doc.get('file_name')}» не подходит: нужны фото, PNG/JPG или PDF.", msg["message_id"])
+            tg.send(chat, f"Файл «{name}» не читаю: подходят фото, PDF, PNG/JPG и Word (.docx).", msg["message_id"])
     return out
+
+
+INVOICE_NAME = re.compile(r"^сч[её]т на оплату", re.IGNORECASE)
+INVOICE_WORDS = re.compile(r"подпис|печат|факсимил", re.IGNORECASE)
+
+
+def is_invoice_pdf(msg, text):
+    """PDF «Счет на оплату» из 1С (по имени файла) или PDF с подписью «подпись/печать»."""
+    doc = msg.get("document") or {}
+    name = doc.get("file_name") or ""
+    if not (doc.get("mime_type") == "application/pdf" or name.lower().endswith(".pdf")):
+        return False
+    return bool(INVOICE_NAME.match(name) or INVOICE_WORDS.search(text or ""))
+
+
+def stamp_invoice(tg, msg, files):
+    """Подпись и печать 90 ГРАДУСОВ на счёт из 1С -> PDF в ответ (app/invoice_stamp)."""
+    chat = msg["chat"]["id"]
+    name = (msg.get("document") or {}).get("file_name") or "Счет.pdf"
+    if not files:
+        return
+    try:
+        out = stamp_pdf(files[0], FILES / str(chat) / f"{Path(name).stem} (подпись).pdf")
+        tg.send_file(chat, out, "Подпись и печать поставлены. Проверьте перед отправкой клиенту.", msg["message_id"])
+        log(f"счёт с подписью: {name}")
+    except StampError as e:
+        tg.send(chat, f"Не смог поставить подпись: {e}", msg["message_id"])
+    except Exception as e:
+        log(f"счёт: {e}\n{traceback.format_exc()}")
+        tg.send(chat, "Не получилось поставить подпись на счёт — напишите Дмитрию.", msg["message_id"])
+
+
+def pdf_pages(path, limit=PDF_PAGES):
+    """PDF -> PNG страниц (для картинок КП)."""
+    import fitz  # pymupdf
+    doc = fitz.open(path)
+    out = []
+    for i in range(min(len(doc), limit)):
+        png = path.with_name(f"{path.stem}_p{i + 1}.png")
+        if not png.exists():
+            doc[i].get_pixmap(dpi=150).save(png)
+        out.append(png)
+    return out
+
+
+def docx_text(path):
+    from docx import Document
+    d = Document(str(path))
+    lines = [p.text for p in d.paragraphs if p.text.strip()]
+    for t in d.tables:
+        for row in t.rows:
+            cells = []
+            for c in row.cells:
+                if c.text.strip() and c.text.strip() not in cells:
+                    cells.append(c.text.strip())
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def split_files(files):
+    """-> (картинки, PDF, текст Word-файлов)."""
+    files = [Path(f) for f in files]
+    imgs = [f for f in files if f.suffix.lower() in (".jpg", ".jpeg", ".png")]
+    pdfs = [f for f in files if f.suffix.lower() == ".pdf"]
+    texts = [f"Файл «{f.name}» (Word):\n{docx_text(f)}" for f in files if f.suffix.lower() == ".docx"]
+    return imgs, pdfs, "\n\n".join(texts)
 
 
 def deal_title(env, deal_id):
@@ -334,21 +419,241 @@ def run_job(tg, client, env, chat, reply_to, text, images, previous=None, sender
     return m["message_id"], kp, title
 
 
+def find_kp(st, chat, text):
+    """КП для договора без ответа на КП: по «#номеру» из текста, иначе последнее КП этого чата за сутки."""
+    m = re.search(r"#(\d+)", text)
+    since = (datetime.now() - timedelta(hours=KP_FOR_CONTRACT_H)).isoformat(timespec="seconds")
+    for key, job in reversed(list(st["jobs"].items())):
+        if not key.startswith(f"{chat}:") or job.get("kind", "kp") != "kp":
+            continue
+        if m and job["kp"].get("deal_id") == m.group(1):
+            return job
+        if not m and job.get("at", "") >= since:
+            return job
+    return None
+
+
+def contract_summary(r, c, link, kp_name=None):
+    pay = "; ".join(f"{p}% - {make_kp.money(a)}" for p, a in r["payments"])
+    lines = [f"Договор № {r['number']} от {r['date']}"] + ([f"Открыть и править: {link}"] if link else []) + (
+        [f"Позиции и цены — из КП: {kp_name}"] if kp_name else []) + [
+        "", f"Заказчик: {make_contract.customer_short(make_contract.dashes(parse_contract.to_make_contract(c))['customer'])}",
+        f"Итого: {make_kp.money(r['total'])}", f"Оплата: {pay}",
+        f"Срок производства: {c.schedule.production_days} раб. дней"]
+    notes = list(c.questions)[:3] + r["warnings"]
+    if notes:
+        lines += ["", "Проверьте:"] + [f"– {x}" for x in notes]
+    lines += ["", "Перед отправкой клиенту просмотрите каждую страницу (чек-лист договоров).",
+              "Правка — ответьте на это сообщение."]
+    return "\n".join(lines).replace("\u00a0", " ")
+
+
+def contract_missing(c):
+    """Чего не хватает для договора — человеческими словами."""
+    out, cu = [], c.customer
+    if not cu.full_name or (cu.type in ("ООО", "ИП") and not cu.inn):
+        out.append("реквизиты заказчика (карточка предприятия: наименование, ИНН, ОГРН) или данные физлица")
+    signer = cu.representative.name_parts if cu.type == "ООО" else cu.name_parts
+    if cu.type == "ООО" and cu.full_name and not (cu.representative.name and cu.representative.position):
+        out.append("кто подписывает от заказчика: должность и ФИО полностью")
+    elif cu.full_name and signer.last and not signer.middle:
+        out.append("отчество подписанта (нужно для номера договора)")
+    if not c.items:
+        out.append("позиции с ценами (КП файлом или ответом на сводку КП)")
+    elif any(not (it.unit_price or it.total) for it in c.items):
+        out.append("цены у всех позиций")
+    if not c.schedule.production_days:
+        out.append("срок производства (рабочих дней)")
+    return out
+
+
+def contract_card(c):
+    """Что бот понял по договору — показать перед сборкой. -> (текст, готово ли)."""
+    cu, lines = c.customer, ["Договор — что есть сейчас:", ""]
+    if cu.full_name:
+        who = {"ООО": cu.short_name or cu.full_name, "ИП": f"ИП {cu.full_name}"}.get(cu.type, cu.full_name)
+        ids = ", ".join(x for x in (f"ИНН {cu.inn}" if cu.inn else "", f"ОГРН {cu.ogrn}" if cu.ogrn else "",
+                                    f"ОГРНИП {cu.ogrnip}" if cu.ogrnip else "") if x)
+        lines.append(f"✅ Заказчик: {who}" + (f" ({ids})" if ids else ""))
+        if cu.type == "ООО" and cu.representative.name:
+            lines.append(f"✅ Подписывает: {cu.representative.position} {cu.representative.name}, "
+                         f"на основании {cu.representative.basis_genitive or 'Устава'}")
+        if cu.type == "физлицо":
+            lines.append("✅ Паспорт: есть" if cu.passport.number else "❗ Паспорт: нет (можно без него, но лучше добавить)")
+    if c.items:
+        total = sum(it.total or it.unit_price * it.quantity for it in c.items)
+        lines.append(f"✅ Позиции: {len(c.items)} на {make_kp.money(total)}")
+        lines += [f"   • {it.name} - {it.quantity} {it.unit or 'шт.'}: {make_kp.money(it.total or it.unit_price * it.quantity)}"
+                  for it in c.items[:8]]
+    sv = c.services
+    lines.append(f"✅ {sv.label or 'Доставка и монтаж'}: входят, {make_kp.money(sv.price)}" if sv.included
+                 else "✅ Доставка и монтаж: не входят")
+    if c.schedule.production_days:
+        lines.append(f"✅ Срок производства: {c.schedule.production_days} раб. дней"
+                     + (f"; чертежи {c.schedule.drawings_days} раб. дней" if c.schedule.drawings_days else ""))
+    lines.append("✅ Оплата: " + (" / ".join(f"{p.percent}%" for p in c.payment) if c.payment else "70/30 (по умолчанию)"))
+    miss = contract_missing(c)
+    if miss:
+        lines += ["", "Не хватает:"] + [f"❗ {x}" for x in miss]
+    if c.questions:
+        lines += ["", "Проверьте:"] + [f"– {q}" for q in c.questions[:3]]
+    lines += ["", "Пришлите недостающее или исправление — файлом или текстом." if miss else
+              "Если всё верно — «Собрать договор». Исправить можно текстом: «оплата 100%», «доставка входит, адрес …»."]
+    return "\n".join(lines).replace("\u00a0", " "), not miss
+
+
+def send_contract(tg, chat, reply_to, c, kp=None):
+    """Собрать DOCX, Google Документ и PDF, отправить. -> id сообщения со сводкой."""
+    tg.send(chat, "Собираю договор…", reply_to)
+    try:
+        r = make_contract.build(parse_contract.to_make_contract(c), CONTRACTS_OUT)
+    except make_contract.ContractError as e:
+        log(f"чат {chat}: договор не собран: {e}")
+        return tg.send(chat, f"Договор не собран: {e}\nПришлите исправление ответом на это сообщение.", reply_to)["message_id"]
+    path, link = r["path"], None
+    if gdrive.ready():
+        try:
+            fid, link = retry(lambda: gdrive.upload(path, "contract"), "Drive: договор")
+            pdf = retry(lambda: gdrive.export_pdf(fid, path.with_suffix(".pdf")), "Drive: PDF договора")
+            tg.send_file(chat, pdf, f"Договор № {r['number']} (PDF)", reply_to)
+        except Exception as e:
+            log(f"Drive: договор не загружен ({type(e).__name__}: {e})")
+            link = None
+    tg.send_file(chat, path, "DOCX для Word / Google Docs", reply_to)
+    kp_name = ", ".join(i.get("name", "") for i in (kp or {}).get("items", [])) if kp else None
+    m = tg.send(chat, contract_summary(r, c, link, kp_name), reply_to)
+    log(f"чат {chat}: договор {r['number']}, итого {r['total']}, ссылка {'есть' if link else 'нет'}")
+    return m["message_id"]
+
+
+INVOICE = re.compile(r"\b(выстав\w*|нуж\w*|сдела\w*|сформир\w*|подготов\w*)\b[^.\n]{0,25}\bсч[её]т|^\s*сч[её]т\b",
+                     re.IGNORECASE | re.MULTILINE)
+INVOICE_REPLY = ("Счета я пока не выставляю: ждём доступ к 1С, после него бот будет делать счёт по реквизитам "
+                 "из договора или карточки. Сейчас счёт - в 1С вручную (инструкция docs/16).")
+WAIT_MIN = 30  # заявка без понятного действия ждёт кнопку или уточнение столько минут
+
+
+def decide(bundle, session=None):
+    """Что делать с заявкой: (действие, доп.). Действия: kp, contract, session, build, invoice, ask."""
+    text, job = bundle["text"], bundle.get("reply_job")
+    if session and not job:  # идёт сбор договора: всё присланное — туда
+        if BUILD_WORDS.match(text) and not bundle["files"]:
+            return "build", {}
+        if TRIGGER.search(text) and not CONTRACT.search(text) and re.search(r"\bкп\b", text, re.IGNORECASE):
+            return "kp", {}
+        return "session", {}
+    if job and job.get("kind") == "contract":
+        return "contract", {"previous": job}
+    if job:  # ответ на КП
+        if CONTRACT.search(text):
+            return "contract", {"kp_job": job}
+        if INVOICE.search(text):
+            return "invoice", {}
+        return "kp", {"previous": job}
+    if CONTRACT.search(text):
+        return "contract", {}
+    if INVOICE.search(text):
+        return "invoice", {}
+    if TRIGGER.search(text):
+        return "kp", {}
+    return "ask", {}
+
+
+SESSION_H = 3  # сессия договора живёт столько часов без сообщений
+BUILD_WORDS = re.compile(r"^\s*(собер\w*|собрать|готово|ок|ok|да)\s*[.!]*\s*$", re.IGNORECASE)
+
+
+def session_absorb(tg, client, st, chat, b, sess):
+    """Добавить в сессию договора то, что прислали (файлы/текст), и показать карточку с кнопками."""
+    imgs, pdfs, words = split_files(b["files"])
+    text = "\n\n".join(x for x in (b["text"], words) if x) or "(файлы без текста)"
+    tg.send(chat, "Читаю…" if sess.get("contract") else "Готовлю договор. Читаю присланное…", b["reply_to"])
+    prev = parse_contract.Contract.model_validate(sess["contract"]) if sess.get("contract") else None
+    c = parse_contract.parse(client, text, imgs, sess.get("kp"), prev, pdfs)
+    sess.update(contract=c.model_dump(), at=datetime.now().isoformat(timespec="seconds"))
+    sess.setdefault("files", []).extend(b["files"])
+    card, ready = contract_card(c)
+    buttons = ([("Собрать договор", f"build:{chat}")] if ready else []) + [("Отмена", f"cancel:{chat}")]
+    sess["card"] = tg.ask(chat, card, buttons, b["reply_to"])["message_id"]
+    st["sessions"][str(chat)] = sess
+    save_state(st)
+    log(f"чат {chat}: договор, сессия: позиций {len(c.items)}, заказчик {'есть' if c.customer.full_name else 'нет'}, готово {ready}")
+
+
+def session_build(tg, st, chat, reply_to):
+    sess = st["sessions"].pop(str(chat), None)
+    save_state(st)
+    if not sess or not sess.get("contract"):
+        tg.send(chat, "Нет начатого договора. Напишите «договор» и пришлите КП и реквизиты.", reply_to)
+        return
+    c = parse_contract.Contract.model_validate(sess["contract"])
+    tg.sent = []
+    mid = send_contract(tg, chat, reply_to, c, sess.get("kp"))
+    job = {"kind": "contract", "contract": sess["contract"], "kp": sess.get("kp"),
+           "pdfs": [f for f in sess.get("files", []) if f.endswith(".pdf")], "at": datetime.now().isoformat(timespec="seconds")}
+    for m_id in set(tg.sent + [mid]):
+        st["jobs"][f"{chat}:{m_id}"] = job
+    st["jobs"] = dict(list(st["jobs"].items())[-MAX_JOBS:])
+    save_state(st)
+
+
+def active_session(st, chat):
+    sess = st["sessions"].get(str(chat))
+    if sess and datetime.fromisoformat(sess["at"]) > datetime.now() - timedelta(hours=SESSION_H):
+        return sess
+    st["sessions"].pop(str(chat), None)
+    return None
+
+
+def execute(tg, client, env, st, chat, b, action, extra):
+    """Запустить КП, начать/дополнить договор или поправить готовый договор."""
+    tg.sent = []
+    imgs, pdfs, words = split_files(b["files"])
+    text = "\n\n".join(x for x in (b["text"], words) if x)
+    if action == "contract" and extra.get("previous"):  # правка готового договора — сразу пересборка
+        prev = extra["previous"]
+        tg.send(chat, "Вношу исправление…", b["reply_to"])
+        c = parse_contract.parse(client, text, imgs, prev.get("kp"), parse_contract.Contract.model_validate(prev["contract"]),
+                                 pdfs + [Path(x) for x in prev.get("pdfs", [])])
+        mid = send_contract(tg, chat, b["reply_to"], c, prev.get("kp"))
+        job = {**prev, "contract": c.model_dump(), "pdfs": prev.get("pdfs", []) + [str(x) for x in pdfs],
+               "at": datetime.now().isoformat(timespec="seconds")}
+    elif action == "contract":  # новый договор — пошагово
+        kp_job = extra.get("kp_job") or find_kp(st, chat, b["text"])
+        sess = {"kp": (kp_job or {}).get("kp"), "at": datetime.now().isoformat(timespec="seconds")}
+        if kp_job:
+            tg.send(chat, "Беру позиции и цены из КП: " + ", ".join(i.get("name", "") for i in sess["kp"].get("items", [])), b["reply_to"])
+        session_absorb(tg, client, st, chat, b, sess)
+        return
+    elif action == "session":
+        session_absorb(tg, client, st, chat, b, active_session(st, chat))
+        return
+    else:
+        prev = extra.get("previous")
+        images = [str(x) for x in imgs] + [str(x) for f in pdfs for x in pdf_pages(f)]
+        images = (prev or {}).get("images", []) + images
+        mid, kp, title = run_job(tg, client, env, chat, b["reply_to"], text, [Path(x) for x in images], prev, b.get("sender", ""))
+        job = {"kp": kp.model_dump(), "images": images, "client": title, "at": datetime.now().isoformat(timespec="seconds")}
+    for m_id in set(tg.sent + [mid, b["reply_to"]] + b.get("msg_ids", [])):
+        st["jobs"][f"{chat}:{m_id}"] = job
+    st["jobs"] = dict(list(st["jobs"].items())[-MAX_JOBS:])
+    save_state(st)
+
+
 def main():
     env = load_env()
     tg = TG(env["KP_TG_BOT_TOKEN"])
     client = anthropic.Anthropic(api_key=env["ANTHROPIC_API_KEY"])
     allow = {x.strip().lstrip("@").lower() for x in env.get("KP_TG_ALLOWED_IDS", "").split(",") if x.strip()}
     st = load_state()
-    pending = {}  # chat -> {"text", "reply_to", "images", "last"}
-    buffer = {}   # chat -> [(time, path)] картинки до задания
-    captions = {}  # chat -> [подписи к картинкам без «КП»] — войдут в задание
-    acks = {}     # chat -> {"last", "reply_to"} — ответить «картинки получил», когда альбом дойдёт целиком
-    outage = None  # {"since", "count"} — пока нет связи с Telegram
+    inbox = {}    # chat -> заявка, которая ещё собирается: {"texts", "files", "reply_to", "reply_job", "last", "sender"}
+    waiting = {}  # id -> заявка, ждущая кнопку «КП / Договор»
+    outage = None
     log("бот запущен")
     while True:
         try:
-            ups = tg.call("getUpdates", {"offset": st["offset"], "timeout": 2 if pending or acks else 25}, timeout=40)
+            ups = tg.call("getUpdates", {"offset": st["offset"], "timeout": 2 if inbox else 25,
+                                         "allowed_updates": ["message", "callback_query"]}, timeout=40)
         except Exception as e:
             if outage is None:
                 outage = {"since": time.time(), "count": 0}
@@ -357,14 +662,47 @@ def main():
             time.sleep(10)
             continue
         if outage:
-            log(f"связь с Telegram восстановлена: {outage['count']} неудачных запросов за "
-                f"{(time.time() - outage['since']) / 60:.0f} мин")
+            log(f"связь с Telegram восстановлена: {outage['count']} неудачных запросов за {(time.time() - outage['since']) / 60:.0f} мин")
             outage = None
+
         for u in ups:
             st["offset"] = u["update_id"] + 1
+            cb = u.get("callback_query")
+            if cb:  # нажата кнопка «КП» / «Договор»
+                try:
+                    tg.call("answerCallbackQuery", {"callback_query_id": cb["id"]})
+                except Exception:
+                    pass
+                if not allowed(cb.get("from", {}), allow):
+                    continue
+                action, _, bid = (cb.get("data") or "").partition(":")
+                chat = cb["message"]["chat"]["id"]
+                if action in ("build", "cancel"):
+                    log(f"кнопка: {action} чат {chat}")
+                    try:
+                        if action == "build":
+                            session_build(tg, st, chat, cb["message"]["message_id"])
+                        else:
+                            st["sessions"].pop(str(chat), None)
+                            save_state(st)
+                            tg.send(chat, "Договор отменён.")
+                    except Exception as e:
+                        log(f"чат {chat}: ошибка {e}\n{traceback.format_exc()}")
+                        tg.send(chat, f"Ошибка: {e}. Попробуйте ещё раз или напишите Дмитрию.")
+                    continue
+                b = waiting.pop(bid, None)
+                log(f"кнопка: {action} заявка {bid} ({'есть' if b else 'нет'})")
+                if not b:
+                    tg.send(chat, "Эта заявка устарела. Пришлите файлы и задание ещё раз.")
+                    continue
+                try:
+                    execute(tg, client, env, st, chat, b, action, {})
+                except Exception as e:
+                    log(f"чат {chat}: ошибка {e}\n{traceback.format_exc()}")
+                    tg.send(chat, f"Ошибка: {e}. Попробуйте ещё раз или напишите Дмитрию.", b["reply_to"])
+                continue
             msg = u.get("message")
             if not msg or msg["chat"]["type"] != "private":
-                log(f"пропущено: {[k for k in u if k != 'update_id']} {msg and msg['chat']['type']}")
                 continue
             chat, user = msg["chat"]["id"], msg.get("from", {})
             log(f"входящее: id={user.get('id')} @{user.get('username')} текст={len(message_text(msg))} "
@@ -379,77 +717,95 @@ def main():
                 tg.send(chat, HELP)
                 continue
             if text == "/new":
-                buffer.pop(chat, None)
-                captions.pop(chat, None)
-                acks.pop(chat, None)
-                pending.pop(chat, None)
-                tg.send(chat, "Картинки сброшены.")
+                inbox.pop(chat, None)
+                st["sessions"].pop(str(chat), None)
+                for k in [k for k, w in waiting.items() if w["chat"] == chat]:
+                    waiting.pop(k)
+                tg.send(chat, "Сбросил присланное. Можно начинать заново.")
+                continue
+            if not text and not (msg.get("photo") or msg.get("document")):
+                kind = next((k for k in ("voice", "audio", "video", "video_note", "sticker", "animation") if msg.get(k)), None)
+                if kind:
+                    tg.send(chat, "Голосовые, видео и стикеры я не разбираю - напишите текстом. Файлы: фото, PDF, Word.", msg["message_id"])
                 continue
             try:
-                files = attachments(tg, msg)
+                files = download(tg, msg)
             except Exception as e:
                 log(f"файл не скачан: {e}")
-                tg.send(chat, "Не удалось скачать файл, пришлите ещё раз.", msg["message_id"])
+                tg.send(chat, "Не удалось скачать файл, пришлите его ещё раз.", msg["message_id"])
                 files = []
+            if is_invoice_pdf(msg, text):
+                stamp_invoice(tg, msg, files)
+                continue
             reply = msg.get("reply_to_message", {}).get("message_id")
             job = st["jobs"].get(f"{chat}:{reply}") if reply else None
-            p = pending.get(chat)
-            if p and msg.get("media_group_id") and msg.get("media_group_id") == p.get("group"):
-                p["images"] += files
-                p["last"] = time.time()
-            elif job and text:  # правка готового КП
-                pending[chat] = {"text": text, "reply_to": msg["message_id"], "images": job["images"] + [str(f) for f in files],
-                                 "last": time.time(), "group": msg.get("media_group_id"), "previous": job,
-                                 "sender": user.get("username") or ""}
-            elif text and TRIGGER.search(text):
-                old = [str(f) for t, f in buffer.pop(chat, []) if time.time() - t < BUFFER_MIN * 60]
-                caps = captions.pop(chat, [])
-                text = "\n".join((caps if old else []) + [text])  # подписи — только если их картинки ещё не устарели
-                acks.pop(chat, None)
-                pending[chat] = {"text": text, "reply_to": msg["message_id"], "images": old + [str(f) for f in files],
-                                 "last": time.time(), "group": msg.get("media_group_id"), "sender": user.get("username") or ""}
-            elif files:
-                buffer.setdefault(chat, []).extend((time.time(), f) for f in files)
-                if text:
-                    captions.setdefault(chat, []).append(text)
-                acks[chat] = {"last": time.time(), "reply_to": acks.get(chat, {}).get("reply_to") or msg["message_id"]}
-            elif not text:
-                kind = next((k for k in ("voice", "audio", "video", "video_note", "sticker", "animation", "location", "contact")
-                             if msg.get(k)), "другое")
-                log(f"чат {chat}: не текст и не картинка ({kind})")
-                tg.send(chat, "Голосовые, видео и стикеры я не разбираю. Пришлите задание текстом "
-                              "(картинки и PDF - можно). /help - подсказка.", msg["message_id"])
-            elif text:
-                tg.send(chat, "Не понял. Задание на КП — с «#номер сделки» или словом «КП». Правка — ответом на сообщение с КП. /help — подсказка.",
-                        msg["message_id"])
+            b = inbox.get(chat)
+            if b is None or (job and job is not b.get("reply_job")):
+                b = inbox[chat] = {"chat": chat, "texts": [], "files": [], "reply_to": msg["message_id"], "reply_job": job,
+                                   "sender": user.get("username") or ""}
+            if text:
+                b["texts"].append(text)
+            rt = msg.get("reply_to_message") or {}
+            if not job and (rt.get("photo") or rt.get("document")):  # ответ на ранее присланный файл — взять его
+                try:
+                    b["files"] += [str(f) for f in download(tg, rt) if str(f) not in b["files"]]
+                except Exception as e:
+                    log(f"файл из ответа не скачан: {e}")
+            b["files"] += [str(f) for f in files]
+            b.setdefault("msg_ids", []).append(msg["message_id"])
+            b["last"] = time.time()
         save_state(st)
 
-        for chat, a in list(acks.items()):  # альбом без «КП» дошёл — сказать, что ждём задание
-            if time.time() - a["last"] < QUIET_SEC:
+        # Заявка собрана (тишина QUIET_SEC) — решаем, что делать.
+        for chat, b in list(inbox.items()):
+            if time.time() - b["last"] < QUIET_SEC:
                 continue
-            acks.pop(chat)
-            n = sum(1 for t, _ in buffer.get(chat, []) if time.time() - t < BUFFER_MIN * 60)
-            note = " Подпись к ним тоже учту." if captions.get(chat) else ""
-            tg.send(chat, f"Картинки получил ({n}).{note} Теперь пришлите задание с «#номером сделки» или словом «КП» - "
-                          f"соберу КП с этими картинками. Картинки ждут {BUFFER_MIN} мин, /new - сбросить.", a["reply_to"])
-
-        for chat, p in list(pending.items()):
-            if time.time() - p["last"] < QUIET_SEC:
+            inbox.pop(chat)
+            if not b["texts"] and not b["files"]:
                 continue
-            pending.pop(chat)
+            if not b.get("reply_job"):  # дописали к заявке, которая ждёт кнопку, — объединяем
+                for k, w in list(waiting.items()):
+                    if w["chat"] == chat and time.time() - w["last"] < WAIT_MIN * 60:
+                        b["texts"] = w["texts"] + b["texts"]
+                        b["files"] = w["files"] + b["files"]
+                        b["reply_to"] = w["reply_to"]
+                        b["msg_ids"] = w.get("msg_ids", []) + b.get("msg_ids", [])
+                        waiting.pop(k)
+            b["text"] = "\n".join(b["texts"])
+            action, extra = decide(b, active_session(st, chat))
+            if action == "build":
+                try:
+                    session_build(tg, st, chat, b["reply_to"])
+                except Exception as e:
+                    log(f"чат {chat}: ошибка {e}\n{traceback.format_exc()}")
+                    tg.send(chat, f"Ошибка: {e}. Попробуйте ещё раз или напишите Дмитрию.", b["reply_to"])
+                continue
+            log(f"чат {chat}: заявка -> {action} (файлов {len(b['files'])}, текст {len(b['text'])})")
+            if action == "invoice":
+                tg.send(chat, INVOICE_REPLY, b["reply_to"])
+                if b["files"]:
+                    action = "ask"
+                else:
+                    continue
+            if action == "ask":
+                bid = uuid.uuid4().hex[:8]
+                waiting[bid] = b
+                n = len(b["files"])
+                what = f"Получил {n} файл(а)" + (" и текст" if b["text"] else "") if n else "Получил текст"
+                tg.ask(chat, f"{what}. Что сделать?", [("Сделать КП", f"kp:{bid}"), ("Сделать договор", f"contract:{bid}")],
+                       b["reply_to"])
+                continue
             try:
-                images = [Path(x) for x in p["images"]]
-                mid, kp, title = run_job(tg, client, env, chat, p["reply_to"], p["text"], images, p.get("previous"), p.get("sender", ""))
-                st["jobs"][f"{chat}:{mid}"] = {"kp": kp.model_dump(), "images": p["images"], "client": title,
-                                               "at": datetime.now().isoformat(timespec="seconds")}
-                st["jobs"] = dict(list(st["jobs"].items())[-MAX_JOBS:])
-                save_state(st)
+                execute(tg, client, env, st, chat, b, action, extra)
             except Exception as e:
                 log(f"чат {chat}: ошибка {e}\n{traceback.format_exc()}")
                 try:
-                    tg.send(chat, f"Ошибка, КП не собрано: {e}. Попробуйте ещё раз или напишите Дмитрию.", p["reply_to"])
+                    tg.send(chat, f"Ошибка: {e}. Попробуйте ещё раз или напишите Дмитрию.", b["reply_to"])
                 except Exception:
                     pass
+        for k, w in list(waiting.items()):  # старые заявки без выбора — забыть
+            if time.time() - w["last"] > WAIT_MIN * 60:
+                waiting.pop(k)
 
 
 if __name__ == "__main__":

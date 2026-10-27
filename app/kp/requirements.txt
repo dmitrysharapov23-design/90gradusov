@@ -5,3 +5,4 @@ anthropic==0.125.0
 pydantic==2.13.5
 google-api-python-client
 google-auth-oauthlib
+python-docx

@@ -52,20 +52,29 @@ def _state():
     return json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
 
 
-def folder(svc):
-    """Папка «КП 90 градусов» в корне Drive владельца; создаётся при первом КП."""
+FOLDERS = {"kp": (FOLDER_NAME, "folder_id"), "contract": ("Договоры 90 градусов", "contracts_folder_id")}
+
+
+def folder(svc, kind="kp"):
+    """Папка КП / договоров в корне Drive владельца; создаётся при первом файле.
+    Новая папка сразу открывается тем, кому открыта папка КП (shared_with)."""
+    name, key = FOLDERS[kind]
     st = _state()
-    if st.get("folder_id"):
+    if st.get(key):
         try:
-            f = svc.files().get(fileId=st["folder_id"], fields="id,trashed").execute()
+            f = svc.files().get(fileId=st[key], fields="id,trashed").execute()
             if not f.get("trashed"):
-                return st["folder_id"]
+                return st[key]
         except Exception:
             pass
-    f = svc.files().create(body={"name": FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"},
+    f = svc.files().create(body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
                            fields="id").execute()
-    st["folder_id"] = f["id"]
+    st[key] = f["id"]
     STATE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+    if kind != "kp":
+        for email in st.get("shared_with", []):
+            svc.permissions().create(fileId=f["id"], body={"type": "user", "role": "writer", "emailAddress": email},
+                                     sendNotificationEmail=False).execute()
     return f["id"]
 
 
@@ -82,17 +91,22 @@ def share(email):
     STATE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def upload(pptx: Path):
-    """PPTX -> Google Презентация в папке КП. -> (file_id, ссылка)."""
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+DOCS_MIME = "application/vnd.google-apps.document"
+
+
+def upload(pptx: Path, kind="kp"):
+    """PPTX -> Google Презентация, DOCX -> Google Документ, в папке КП или договоров. -> (file_id, ссылка)."""
     svc = service()
-    body = {"name": pptx.stem, "mimeType": SLIDES_MIME, "parents": [folder(svc)]}
-    media = MediaFileUpload(str(pptx), mimetype=PPTX_MIME, resumable=True)
+    is_doc = pptx.suffix.lower() == ".docx"
+    body = {"name": pptx.stem, "mimeType": DOCS_MIME if is_doc else SLIDES_MIME, "parents": [folder(svc, kind)]}
+    media = MediaFileUpload(str(pptx), mimetype=DOCX_MIME if is_doc else PPTX_MIME, resumable=True)
     f = svc.files().create(body=body, media_body=media, fields="id,webViewLink").execute()
     return f["id"], f["webViewLink"]
 
 
 def export_pdf(file_id: str, dest: Path) -> Path:
-    """PDF из Google Презентации — шрифты Google внутри, смотрится одинаково везде."""
+    """PDF из Google Презентации / Документа — так файл видят в Google, шрифты внутри."""
     req = service().files().export_media(fileId=file_id, mimeType="application/pdf")
     buf = io.BytesIO()
     dl = MediaIoBaseDownload(buf, req)
