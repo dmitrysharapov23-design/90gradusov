@@ -460,6 +460,13 @@ def main():
             fix_deals_without_contact(b24)
         except Exception as e:  # проверка сделок не должна мешать заявкам
             log(f"сделки без контакта: ОШИБКА {e}")
+        try:
+            import lead_numbers  # номер лида в названии лида и в поле сделки (просьба Екатерины 27.10.2026)
+            n = lead_numbers.main(["--apply", "--days", "3"], b24)
+            if n:
+                log(f"номер лида: обновлено {n}")
+        except Exception as e:
+            log(f"номер лида: ОШИБКА {e}")
         reqs = [r for r in reqs if r["src_id"] not in state["done"]]
     reqs.sort(key=lambda r: r["date"])
     if args.create and not reqs:
