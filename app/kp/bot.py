@@ -70,7 +70,7 @@ HELP = """Бот ведёт ЗАКАЗЫ. Присылайте всё по кл�
 Файлы: фото, PDF, PNG/JPG, Word. Голосовые не разбираю.
 /orders — заказы, /new — новый заказ."""
 HELP_1C = ("• Счёт: выставьте в 1С, PDF сюда — поставлю подпись и печать.",
-           "• Счёт — кнопка «Выставить счёт» или слово «счёт»: создам заказ в 1С и пришлю счёт с подписью и печатью. "
+           "• Счёт — кнопка «Выставить счёт» или слово «счёт»: создам заказ в 1С (нового клиента и «Договор 90 …» заведу сам) и пришлю счёт с подписью и печатью. "
            "Счёт из 1С (PDF) тоже можно прислать — поставлю подпись и печать.")
 
 
@@ -566,17 +566,18 @@ def issue_invoice(tg, env, o, reply_to, again=False):
     tg.send(chat, "Создаю заказ в 1С…", reply_to)
     try:
         c = odata.OneC(env)
-        k = c.find_customer(cust.get("inn", ""), cust.get("kpp", ""), "" if cust.get("inn") else cust["full_name"])
-        who = cust.get("short_name") or cust["full_name"]
+        k = c.find_customer(cust.get("inn", ""), cust.get("kpp", ""), "" if cust.get("inn") else odata.customer_names(cust)[0])
+        number = (o["docs"].get("contract") or {}).get("number", "")
         if not k:
-            tg.send(chat, f"В 1С нет клиента {who}" + (f" (ИНН {cust['inn']})" if cust.get("inn") else "") +
-                    ". Заведите клиента и договор «Договор 90 …» (инструкция 16, шаг 1) и нажмите «Выставить счёт» ещё раз.", reply_to)
-            return
-        dog = c.find_contract(k)
-        if not dog:
-            tg.send(chat, f"В 1С у клиента {k.get('Description')} нет договора с 90 ГРАДУСОВ. Заведите «Договор 90 …» "
-                          "(инструкция 16, шаг 1) и нажмите «Выставить счёт» ещё раз.", reply_to)
-            return
+            k, dog = c.create_customer(cust, number)
+            tg.send(chat, f"Завёл в 1С нового клиента «{k['Description']}» и «{dog['Description']}».", reply_to)
+            log(f"чат {chat}: 1С: новый клиент {k['Description']}, {dog['Description']}")
+        else:
+            dog = c.find_contract(k)
+            if not dog:
+                dog = c.create_contract(k, number)
+                tg.send(chat, f"Завёл в 1С «{dog['Description']}».", reply_to)
+                log(f"чат {chat}: 1С: новый договор {dog['Description']}")
         r = c.create_order(k, dog, total, f"Бот КП, заказ {orders.title(o)}")
     except odata.OneCError as e:
         log(f"1С: {e}")

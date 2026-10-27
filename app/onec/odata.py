@@ -1,7 +1,8 @@
 """1С:КА, новая база EtlonKA26 — заказ клиента через OData для счёта из бота КП.
 
-Что можно (решение 21.10.2026 в паспорте): создать и провести «Заказ клиента» ООО «90 ГРАДУСОВ».
-Менять существующие документы и справочники и удалять — нельзя; этот модуль только читает и делает POST нового заказа.
+Что можно (решения 21.10 и 27.10.2026 в паспорте): создать и провести «Заказ клиента» ООО «90 ГРАДУСОВ»;
+для нового клиента — завести партнёра, контрагента и «Договор 90 …». Менять существующие документы и справочники
+и удалять — нельзя; этот модуль только читает и делает POST новых объектов.
 Новый заказ — копия последнего проведённого заказа организации (шаблон): склад, соглашение, валюта, вид операции
 и прочие обязательные поля берутся оттуда, а клиент, договор, сумма и дата — свои.
 
@@ -38,6 +39,49 @@ OWN_FIELDS = {"Назначение_Key", "ОбъектРасчетов_Key", "�
 
 class OneCError(Exception):
     pass
+
+
+# вид клиента в боте -> (Контрагент.ЮрФизЛицо, Контрагент.ЮридическоеФизическоеЛицо, Партнер.ЮрФизЛицо) — как в базе
+KINDS = {"ООО": ("ЮрЛицо", "ЮридическоеЛицо", "Компания"),
+         "ИП": ("ИндивидуальныйПредприниматель", "ФизическоеЛицо", "Компания"),
+         "физлицо": ("ФизЛицо", "ФизическоеЛицо", "ЧастноеЛицо")}
+# поля договора-образца, которые относятся к его клиенту или 1С заводит сама
+CONTRACT_OWN = re.compile(r"^(Ref_Key|DataVersion|Code|Predefined|PredefinedDataName|Description|НаименованиеДляПечати|Номер|"
+                          r"Дата|Сумма|Комментарий|ОбъектРасчетов_Key|Назначение_Key|ИдентификаторПлатежа|КонтактноеЛицо_Key|"
+                          r"БанковскийСчетКонтрагента_Key|Филиалы|ПодтверждающиеДокументы|ДоговорыСЗаказчиками)$|Адрес")
+
+
+def customer_names(cust):
+    """Клиент из бота -> (Description, НаименованиеПолное) в стиле базы: «СБК-МАРКЕТ ООО» / ООО "СБК-МАРКЕТ"."""
+    np = cust.get("name_parts") or {}
+    fio = " ".join(x for x in (np.get("last"), np.get("first"), np.get("middle")) if x)
+    kind = cust.get("type")
+    if kind == "ИП":
+        fio = fio or re.sub(r"^(ИП|Индивидуальный предприниматель)\s+", "", cust["full_name"], flags=re.I)
+        return f"{fio} ИП", f"Индивидуальный предприниматель {fio}"
+    if kind == "физлицо":
+        fio = fio or cust["full_name"]
+        return fio, fio
+    short = cust.get("short_name") or cust["full_name"]
+    core = re.sub(r"^\s*(ООО|Общество с ограниченной ответственностью)\s*", "", short, flags=re.I).strip(" «»\"")
+    return f"{core} ООО", f'ООО "{core}"'
+
+
+def contact_rows(template_rows, address="", phone=""):
+    """Строки контактной информации по видам образца: адреса в свободной форме, телефон."""
+    rows = []
+    for r in template_rows or []:
+        val = address if r.get("Тип") == "Адрес" else phone if r.get("Тип") == "Телефон" else ""
+        if not val:
+            continue
+        js = {"version": 5, "value": val, "type": r["Тип"]}
+        if r["Тип"] == "Адрес":
+            js.update({"country": "Россия", "addressType": "ВСвободнойФорме"})
+        else:
+            js["number"] = val
+        rows.append({"LineNumber": str(len(rows) + 1), "Тип": r["Тип"], "Вид_Key": r["Вид_Key"], "Представление": val,
+                     "Значение": json.dumps(js, ensure_ascii=False), "ЗначенияПолей": ""})
+    return rows
 
 
 def configured(env):
@@ -137,6 +181,54 @@ class OneC:
         if not rows:
             raise OneCError("в 1С нет проведённого заказа клиента 90 ГРАДУСОВ — не с чего взять шаблон")
         return rows[0]
+
+    def create_customer(self, cust, contract_number=""):
+        """Новый клиент: партнёр, контрагент и «Договор 90 …» по образцу клиента из заказа-шаблона.
+        cust — заказчик из договора бота (type, full_name, short_name, inn, kpp, ogrn/ogrnip, address, phone, name_parts).
+        -> (контрагент, договор)."""
+        kind = cust.get("type") if cust.get("type") in KINDS else "ООО"
+        if kind != "физлицо" and not cust.get("inn"):
+            raise OneCError("у заказчика нет ИНН — клиента в 1С не завожу")
+        k_kind, k_legal, p_kind = KINDS[kind]
+        name, full = customer_names(cust)
+        t = self.template()
+        tp = self.get(f"Catalog_Партнеры(guid'{t['Партнер_Key']}')")
+        tk = self.get(f"Catalog_Контрагенты(guid'{t['Контрагент_Key']}')")
+        today = datetime.now().strftime("%Y-%m-%dT00:00:00")
+        partner = {"Description": name, "НаименованиеПолное": full, "ЮрФизЛицо": p_kind, "Клиент": True,
+                   "ОсновнойМенеджер_Key": tp.get("ОсновнойМенеджер_Key", EMPTY), "ДатаРегистрации": today,
+                   "КонтактнаяИнформация": contact_rows(tp.get("КонтактнаяИнформация"), "", cust.get("phone", ""))}
+        p = self._post_contacts("Catalog_Партнеры", partner)
+        k = self._post_contacts("Catalog_Контрагенты", {
+            "Description": name, "НаименованиеПолное": full, "ЮрФизЛицо": k_kind, "ЮридическоеФизическоеЛицо": k_legal,
+            "СтранаРегистрации_Key": tk.get("СтранаРегистрации_Key", EMPTY), "ИНН": cust.get("inn", ""),
+            "КПП": cust.get("kpp", "") if kind == "ООО" else "", "Партнер_Key": p["Ref_Key"],
+            "РегистрационныйНомер": (cust.get("ogrn") if kind == "ООО" else cust.get("ogrnip")) or "",
+            "КонтактнаяИнформация": contact_rows(tk.get("КонтактнаяИнформация"), cust.get("address", ""), cust.get("phone", ""))})
+        return k, self.create_contract(k, contract_number)
+
+    def create_contract(self, customer, contract_number=""):
+        """«Договор 90 <клиент>» с 90 ГРАДУСОВ по образцу договора заказа-шаблона."""
+        t = self.template()
+        tc = self.get(f"Catalog_ДоговорыКонтрагентов(guid'{t['Договор_Key']}')")
+        name = customer["Description"]
+        core = name[:-4] if name.endswith(" ООО") else name
+        today = datetime.now().strftime("%Y-%m-%dT00:00:00")
+        dog = {k: v for k, v in tc.items() if "@" not in k and not CONTRACT_OWN.search(k)}
+        dog.update({"Description": f"Договор 90 {core}", "НаименованиеДляПечати": f"Договор 90 {core}",
+                    "Контрагент_Key": customer["Ref_Key"], "Партнер_Key": customer.get("Партнер_Key") or EMPTY,
+                    "Номер": contract_number or "", "Дата": today if contract_number else "0001-01-01T00:00:00",
+                    "Комментарий": "Заведён ботом КП"})
+        return self._req("POST", "Catalog_ДоговорыКонтрагентов", body=dog)
+
+    def _post_contacts(self, entity, body):
+        """POST; если 1С не приняла контактную информацию — без неё (адрес и телефон Екатерина допишет)."""
+        try:
+            return self._req("POST", entity, body=body)
+        except OneCError:
+            if not body.get("КонтактнаяИнформация"):
+                raise
+            return self._req("POST", entity, body={**body, "КонтактнаяИнформация": []})
 
     def draft(self, customer, contract, total, comment=""):
         """Новый заказ из шаблона: клиент, договор, одна строка на всю сумму, дата — сейчас."""
