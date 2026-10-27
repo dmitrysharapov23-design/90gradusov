@@ -1,11 +1,15 @@
-"""Бот сводки: отчёты по запросу владельца.
+"""Бот сводки: отчёты по запросу владельца и рабочие команды менеджера.
 
-Тот же бот, что присылает ежедневную сводку (TG_BOT_TOKEN). Отвечает только в чат TG_CHAT_ID.
+Тот же бот, что присылает ежедневную сводку (TG_BOT_TOKEN). Отвечает двум чатам:
+владелец (TG_CHAT_ID) — все отчёты; менеджер (data/reports/digest_config.json, manager_chat_id) — только
+«план», «висят», «клиент». Отчёты за период, воронка и сводка-контроль менеджеру недоступны (решение 27.10.2026).
 Ключи в .env: TG_BOT_TOKEN, TG_CHAT_ID, B24_AGENT_WEBHOOK, ANTHROPIC_API_KEY (для «клиент»).
 Б24 — только чтение. Запуск: launchd ru.90gradusov.reports-bot.
 """
 import json
 import re
+import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -17,12 +21,15 @@ from data import MSK, ROOT, env_b24, load_env
 
 DATA = ROOT / "data" / "reports"
 STATE = DATA / "bot_state.json"
+CONFIG = DATA / "digest_config.json"
+sys.path.insert(0, str(ROOT / "scripts"))
 
 HELP = """Отчёты по запросу. Пишите словами или жмите кнопки.
 
 отчёт [период] — лиды по источникам и статусам, скорость ответа, КП, оплаты и отгрузки, сравнение с прошлым периодом
 лиды [период] — только лиды: сколько, откуда, статусы (быстро)
 висят — кто ждёт ответа и кому пора дожимать после КП
+план — утренний план Екатерины прямо сейчас
 воронка — лиды и сделки по стадиям, суммы, зависшие
 клиент 1251 / клиент сд761 / клиент Виталий — саммари истории и договорённостей (около 2 минут)
 
@@ -30,6 +37,15 @@ HELP = """Отчёты по запросу. Пишите словами или �
 
 KEYBOARD = {"keyboard": [["Отчёт за месяц", "Отчёт за неделю"], ["Висят", "Воронка"],
                          ["Лиды за прошлый месяц", "Помощь"]], "resize_keyboard": True, "is_persistent": True}
+
+MANAGER_HELP = """Команды для работы. Пишите словами или жмите кнопки.
+
+план — что сделать сейчас: кому ответить, кого дожать после КП, кого закрыть, лиды без статуса (то же, что утром в 10:00)
+висят — кто ждёт ответа дольше 2 рабочих часов и кому пора касание после КП
+клиент 1251 / клиент Виталий — краткая история клиента: что заказывает, какие цены и сроки называли, что обещали, открытые вопросы (около 2 минут)"""
+
+MANAGER_KEYBOARD = {"keyboard": [["План на сейчас", "Висят"], ["Помощь"]], "resize_keyboard": True, "is_persistent": True}
+MANAGER_CMDS = {"plan", "hanging", "client", "help"}
 
 COMMANDS = [("report", "Отчёт за период: /report месяц"), ("leads", "Лиды за период: /leads неделя"),
             ("hanging", "Кто ждёт ответа и дожима"), ("funnel", "Воронка и зависшие сделки"),
@@ -120,16 +136,20 @@ class TG:
             raise RuntimeError(f"Telegram {method}: {res.get('description')}")
         return res["result"]
 
+    def set_manager(self, manager):
+        self.manager = manager
+
     def send(self, chat, text):
-        """Длинный текст — частями по строкам, до 3900 знаков."""
+        """Длинный текст — частями по строкам, до 3900 знаков. Кнопки — по роли чата."""
+        kb = MANAGER_KEYBOARD if chat == getattr(self, "manager", None) else KEYBOARD
         chunk = ""
         for line in text.split("\n"):
             if len(chunk) + len(line) + 1 > 3900:
-                self.call("sendMessage", {"chat_id": chat, "text": chunk, "reply_markup": KEYBOARD})
+                self.call("sendMessage", {"chat_id": chat, "text": chunk, "reply_markup": kb, "disable_web_page_preview": True})
                 chunk = ""
             chunk += line + "\n"
         if chunk.strip():
-            self.call("sendMessage", {"chat_id": chat, "text": chunk, "reply_markup": KEYBOARD})
+            self.call("sendMessage", {"chat_id": chat, "text": chunk, "reply_markup": kb, "disable_web_page_preview": True})
 
 
 # ---------- команды ----------
@@ -138,10 +158,10 @@ def route(text: str):
     """→ (команда, аргумент) или None."""
     t = text.strip()
     t = re.sub(r"^/(\w+)(@\w+)?", lambda m: {"report": "отчёт", "leads": "лиды", "hanging": "висят", "funnel": "воронка",
-                                            "client": "клиент", "help": "помощь", "start": "помощь"}.get(m.group(1), m.group(1)), t)
+                                            "client": "клиент", "help": "помощь", "start": "помощь", "plan": "план"}.get(m.group(1), m.group(1)), t)
     low = t.lower().replace("ё", "е")
     for word, cmd in (("отчет", "period"), ("лиды", "leads"), ("висят", "hanging"), ("воронка", "funnel"),
-                      ("клиент", "client"), ("помощь", "help")):
+                      ("клиент", "client"), ("помощь", "help"), ("план", "plan")):
         if low.startswith(word):
             arg = t[len(word):].strip()
             arg = re.sub(r"^за\s+", "", arg, flags=re.I)
@@ -149,15 +169,22 @@ def route(text: str):
     return None
 
 
-def handle(tg, chat, text, env, d):
+def handle(tg, chat, text, env, d, role="owner"):
     r = route(text)
     if not r:
-        tg.send(chat, "Не понял. Напишите «помощь» — пришлю список отчётов.")
+        tg.send(chat, "Не понял. Напишите «помощь» — пришлю список команд.")
         return
     cmd, arg = r
-    log(f"команда {cmd} [{arg}]")
+    log(f"{role}: команда {cmd} [{arg}]")
+    if role == "manager" and cmd not in MANAGER_CMDS:
+        tg.send(chat, "Эта команда не для вас. Доступно: план, висят, клиент. Напишите «помощь».")
+        return
     if cmd == "help":
-        tg.send(chat, HELP)
+        tg.send(chat, MANAGER_HELP if role == "manager" else HELP)
+    elif cmd == "plan":
+        import manager_digest
+        text, _ = manager_digest.build(d, datetime.now(MSK))
+        tg.send(chat, text)
     elif cmd in ("period", "leads"):
         p = parse_period(arg)
         if not p:
@@ -183,6 +210,8 @@ def main():
     env = load_env()
     tg = TG(env["TG_BOT_TOKEN"])
     owner = str(env["TG_CHAT_ID"])
+    manager = str(json.loads(CONFIG.read_text())["manager_chat_id"]) if CONFIG.exists() else None
+    tg.set_manager(manager)
     d = env_b24(env)
     st = json.loads(STATE.read_text()) if STATE.exists() else {"offset": 0}
     try:
@@ -204,19 +233,25 @@ def main():
             msg = u.get("message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text") or ""
-            if chat != owner:
+            role = "owner" if chat == owner else "manager" if chat == manager else None
+            if not role:
                 log(f"чужой чат {chat}: пропущено")
                 continue
             if not text:
                 continue
-            try:
-                handle(tg, chat, text, env, d)
-            except Exception as e:
-                log(f"ошибка: {e}\n{traceback.format_exc()}")
-                try:
-                    tg.send(chat, f"Не получилось: {str(e)[:300]}")
-                except Exception:
-                    pass
+            threading.Thread(target=run, args=(tg, chat, text, env, d, role), daemon=True).start()
+
+
+def run(tg, chat, text, env, d, role):
+    """Один запрос в своём потоке: долгое саммари клиента не задерживает другие команды."""
+    try:
+        handle(tg, chat, text, env, d, role)
+    except Exception as e:
+        log(f"ошибка: {e}\n{traceback.format_exc()}")
+        try:
+            tg.send(chat, f"Не получилось: {str(e)[:300]}")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

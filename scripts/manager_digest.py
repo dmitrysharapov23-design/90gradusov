@@ -76,7 +76,7 @@ def build(d, now):
         elif after == 1 and wd >= 5:
             touch2.append((wd, l))
 
-    out = [f"☀️ Доброе утро! План на {now:%d.%m}", ""]
+    out = [f"☀️ Доброе утро! План на {now:%d.%m}" if now.hour < 12 else f"📋 План на {now:%d.%m %H:%M}", ""]
     if wait:
         out.append(f"🔴 Ответить — клиент ждёт ({len(wait)}):")
         for h, l, m in sorted(wait, key=lambda x: -x[0]):
